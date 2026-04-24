@@ -11188,3 +11188,68 @@ body.view-arena #arenaView .arena-local-month-panel{
 .panel-head p{
   display: none !important;
 }
+
+/* ===== Notification definitive fix: scroll, glass-safe frame and drawer bell ===== */
+#drawerNotificationBtn > span:first-child{
+  display:inline-flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+  font-size:1.18rem !important;
+  line-height:1 !important;
+}
+#alertComposerModal.modal,
+#notificationCenterModal.modal,
+#memberAlertModal.modal{
+  align-items:flex-start !important;
+  justify-items:center !important;
+  overflow-y:auto !important;
+  -webkit-overflow-scrolling:touch !important;
+  padding-top:max(18px, calc(env(safe-area-inset-top) + 18px)) !important;
+  padding-bottom:max(18px, calc(env(safe-area-inset-bottom) + 18px)) !important;
+}
+.alert-composer-modal,
+.notification-center-modal,
+.member-alert-modal{
+  width:min(92vw, 560px) !important;
+  max-height:calc(100dvh - 36px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+  overflow:hidden !important;
+  display:flex !important;
+  flex-direction:column !important;
+}
+.alert-composer-modal > .modal-close,
+.notification-center-modal > .modal-close,
+.member-alert-modal > .modal-close{
+  position:absolute !important;
+  top:18px !important;
+  right:18px !important;
+  z-index:5 !important;
+}
+.alert-composer-modal .stack,
+.notification-center-modal .stack,
+.member-alert-modal .stack{
+  overflow-y:auto !important;
+  -webkit-overflow-scrolling:touch !important;
+  padding-right:4px !important;
+  max-height:calc(100dvh - 90px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+}
+.alert-composer-modal .alert-template-list{
+  max-height:none !important;
+  overflow:visible !important;
+}
+.alert-template-btn[disabled],
+#sendLeadershipNoticeBtn[disabled]{
+  opacity:.62 !important;
+  pointer-events:none !important;
+}
+.notification-center-list{
+  max-height:58dvh !important;
+  overflow-y:auto !important;
+  -webkit-overflow-scrolling:touch !important;
+}
+@media (max-width:640px){
+  .alert-composer-modal,
+  .notification-center-modal,
+  .member-alert-modal{
+    width:calc(100vw - 28px) !important;
+  }
+}
