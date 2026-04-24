@@ -1,0 +1,5641 @@
+
+(function(){
+const seedData = window.__TOPBRS_SEED__;
+const STORAGE_KEY = 'topbrs-ultra-pwa-v6-1-auth';
+const LEGACY_STORAGE_KEYS = ['topbrs-ultra-pwa-v4-2-elite-arena','topbrs-ultra-pwa-v3-9-safe','topbrs-ultra-pwa-v4-0-1-real-fix','topbrs-ultra-pwa-v4-0-real-fix','topbrs-ultra-pwa-v3-7','topbrs-ultra-pwa-v3-6','topbrs-ultra-pwa-v3-5','topbrs-ultra-pwa-v3-4','topbrs-ultra-pwa-v3-3','topbrs-ultra-pwa-v3-2','topbrs-ultra-pwa-v3-1','topbrs-ultra-pwa-v3-0','topbrs-ultra-pwa-v2-9','topbrs-ultra-pwa-v2-8','topbrs-ultra-pwa-v2-7','topbrs-ultra-pwa-v2-4','topbrs-ultra-pwa-v2-3','topbrs-ultra-pwa-v2-2','topbrs-ultra-pwa-v2'];
+const appVersion = 'V2.1.8 Oficial Auto';
+const WAR_AUTO_SANDBOX = true;
+const WAR_AUTO_REALTIME_READONLY = true;
+const monthLabels = {
+  JANEIRO:'Janeiro',FEVEREIRO:'Fevereiro','MARÇO':'Março',ABRIL:'Abril',MAIO:'Maio',JUNHO:'Junho',
+  JULHO:'Julho',AGOSTO:'Agosto',SETEMBRO:'Setembro',OUTUBRO:'Outubro',NOVEMBRO:'Novembro',DEZEMBRO:'Dezembro'
+};
+const dayOrder = ['quinta','sexta','sabado','domingo'];
+
+const canonicalMonthMap = {
+  JAN:'JANEIRO', JANEIRO:'JANEIRO',
+  FEV:'FEVEREIRO', FEVEREIRO:'FEVEREIRO',
+  MAR:'MARÇO', 'MARÇO':'MARÇO', MARCO:'MARÇO',
+  ABR:'ABRIL', ABRIL:'ABRIL',
+  MAI:'MAIO', MAIO:'MAIO',
+  JUN:'JUNHO', JUNHO:'JUNHO',
+  JUL:'JULHO', JULHO:'JULHO',
+  AGO:'AGOSTO', AGOSTO:'AGOSTO',
+  SET:'SETEMBRO', SETEMBRO:'SETEMBRO',
+  OUT:'OUTUBRO', OUTUBRO:'OUTUBRO',
+  NOV:'NOVEMBRO', NOVEMBRO:'NOVEMBRO',
+  DEZ:'DEZEMBRO', DEZEMBRO:'DEZEMBRO'
+};
+function canonicalMonthKey(month){
+  const key = String(month || '').trim().toUpperCase();
+  return canonicalMonthMap[key] || key;
+}
+
+let deferredPrompt = null;
+const WAR_AUTO_AUTO_REFRESH_MS = 30000;
+let warAutoRefreshTimer = null;
+let warAutoRefreshBusy = false;
+let currentDecksRarityFilter = 'all';
+let __topbrsToastTimer = null;
+
+function ensureToastHost(){
+  let host = document.getElementById('topbrsToastHost');
+  if(!host){
+    host = document.createElement('div');
+    host.id = 'topbrsToastHost';
+    host.className = 'topbrs-toast-host';
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+function showToast(message='', tone='success'){
+  const host = ensureToastHost();
+  host.innerHTML = `<div class="topbrs-toast ${tone==='error' ? 'error' : ''}">${esc(String(message||''))}</div>`;
+  host.classList.add('visible');
+  clearTimeout(__topbrsToastTimer);
+  __topbrsToastTimer = setTimeout(() => host.classList.remove('visible'), 2200);
+}
+
+function setButtonWorking(btn, working=false, doneLabel='Salvo'){
+  if(!btn) return;
+  if(working){
+    if(!btn.dataset.defaultLabel) btn.dataset.defaultLabel = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add('is-working');
+    btn.textContent = 'Salvando...';
+    return;
+  }
+  btn.disabled = false;
+  btn.classList.remove('is-working');
+  btn.classList.add('is-done');
+  btn.textContent = doneLabel;
+  setTimeout(() => {
+    btn.classList.remove('is-done');
+    btn.textContent = btn.dataset.defaultLabel || 'Salvar';
+  }, 1400);
+}
+
+function normalizePlayerTag(value=''){
+  let tag = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+  if(!tag) return '';
+  if(!tag.startsWith('#')) tag = `#${tag.replace(/^#+/, '')}`;
+  return tag;
+}
+
+function normalizeMatchText(value=''){
+  return String(value||'')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-zA-Z0-9]/g,'')
+    .trim().toLowerCase();
+}
+
+function resolveCurrentLinkedMember(){
+  const uid = currentAccessUid ? currentAccessUid() : '';
+  const email = currentAccessEmail ? currentAccessEmail() : '';
+  const nick = currentAccessNick ? currentAccessNick() : '';
+  const linked = currentAccessLinkedMemberName ? currentAccessLinkedMemberName() : '';
+  const explicitTag = normalizePlayerTag(window.TOPBRS_ACCESS?.playerTag || '');
+  const active = typeof activeMembers === 'function' ? activeMembers() : [];
+  return active.find(member => {
+    const memberTag = normalizePlayerTag(member.playerTag || member.tag || '');
+    const memberNames = [member.name, member.nick, member.fullName, member.linkedMemberName]
+      .map(v => String(v || '').trim().toLowerCase())
+      .filter(Boolean);
+    if(explicitTag && memberTag && explicitTag === memberTag) return true;
+    if(uid && String(member.linkedAuthUid || '') === uid) return true;
+    if(email && String(member.linkedEmail || '').trim().toLowerCase() === email) return true;
+    if(linked && memberNames.includes(linked)) return true;
+    if(nick && memberNames.includes(nick)) return true;
+    return false;
+  }) || null;
+}
+
+let __currentPlayerLiveProfile = null;
+let __currentPlayerLiveProfileTag = '';
+async function ensureCurrentPlayerLiveProfile(force=false){
+  const linkedMember = resolveCurrentLinkedMember();
+  const tag = normalizePlayerTag(window.TOPBRS_ACCESS?.playerTag || linkedMember?.playerTag || linkedMember?.tag || '');
+  if(!tag) return null;
+  if(!force && __currentPlayerLiveProfile && __currentPlayerLiveProfileTag === tag){
+    return __currentPlayerLiveProfile;
+  }
+  const profile = await fetchClashPlayerProfile(tag, { force });
+  if(profile){
+    __currentPlayerLiveProfile = profile;
+    __currentPlayerLiveProfileTag = tag;
+  }
+  return profile || null;
+}
+
+async function getRuntimeClashApiBase(force=false){
+  try{
+    if(window.TOPBRS_API?.loadClashApiBase){
+      return await window.TOPBRS_API.loadClashApiBase(force);
+    }
+  }catch(e){}
+  return String(window.TOPBRS_RUNTIME_CONFIG?.clashApiBase || window.TOPBRS_FIREBASE_CONFIG?.clashApiBase || '').replace(/\/$/, '');
+}
+
+async function fetchClashPlayerProfile(playerTag, options={}){
+  const tag = normalizePlayerTag(playerTag);
+  if(!tag) return null;
+  const apiBase = await getRuntimeClashApiBase(Boolean(options.force));
+  if(!apiBase) throw new Error('API base indisponível');
+  const res = await fetch(`${apiBase}/player/${encodeURIComponent(tag)}`, { cache:'no-store' });
+  if(!res.ok) throw new Error('Falha ao ler jogador');
+  return await res.json();
+}
+
+async function fetchClashCurrentRiverRace(clanTag, options={}){
+  const tag = normalizePlayerTag(clanTag || window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ');
+  const apiBase = await getRuntimeClashApiBase(Boolean(options.force));
+  if(!apiBase) throw new Error('API base indisponível');
+  const res = await fetch(`${apiBase}/clan/${encodeURIComponent(tag)}/currentriverrace`, { cache:'no-store' });
+  if(!res.ok) throw new Error('Falha ao ler guerra atual');
+  return await res.json();
+}
+
+async function fetchClashClanProfile(clanTag, options={}){
+  const tag = normalizePlayerTag(clanTag || window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ');
+  const apiBase = await getRuntimeClashApiBase(Boolean(options.force));
+  if(!apiBase) throw new Error('API base indisponível');
+  const res = await fetch(`${apiBase}/clan/${encodeURIComponent(tag)}`, { cache:'no-store' });
+  if(!res.ok) throw new Error('Falha ao ler clã');
+  return await res.json();
+}
+
+function roleEligibleForSystem(role=''){
+  const normalized = normalizeMatchText(role);
+  return ['anciao','colider','lider'].includes(normalized);
+}
+
+function findActiveMemberLink(record={}){
+  const active = activeMembers();
+  const byTag = new Map(active.map(m => [normalizePlayerTag(m.playerTag || m.tag || ''), m]));
+  const byName = new Map(active.map(m => [normalizeMatchText(m.name || m.nick || ''), m]));
+  return byTag.get(normalizePlayerTag(record.playerTag || record.tag || '')) || byName.get(normalizeMatchText(record.name || record.nick || '')) || null;
+}
+
+async function loadApiConfigSnapshot(force=false){
+  try{
+    if(window.TOPBRS_API?.loadClashApiBase){
+      await window.TOPBRS_API.loadClashApiBase(force);
+    }
+  }catch(e){}
+  const cfg = window.TOPBRS_RUNTIME_CONFIG?.clashApiBase || window.TOPBRS_FIREBASE_CONFIG?.clashApiBase || '';
+  let extra = {};
+  try{
+    const getDoc = window.TOPBRS_AUTH_UI?.__firestoreGetDoc;
+    const docFn = window.TOPBRS_AUTH_UI?.__firestoreDoc;
+    const db = window.TOPBRS_AUTH_UI?.__firestoreDb;
+    if(getDoc && docFn && db){
+      const snap = await getDoc(docFn(db, 'system', 'apiConfig'));
+      extra = snap.data?.() || {};
+    }
+  }catch(e){}
+  return {
+    clashApiBase: String(extra.clashApiBase || cfg || '').replace(/\/$/, ''),
+    source: String(extra.source || ''),
+    updatedAt: String(extra.updatedAt || '')
+  };
+}
+
+function getCurrentWarDayKey(){
+  const ref = getWarReferenceDate();
+  const day = ref.getDay();
+  if(day === 4) return 'thu';
+  if(day === 5) return 'fri';
+  if(day === 6) return 'sat';
+  if(day === 0) return 'sun';
+  return null;
+}
+
+function getArenaLabelFromTrophies(trophies=0){
+  const t = Number(trophies||0);
+  if(t >= 9000) return 'Liga';
+  if(t >= 8500) return 'Arena 23';
+  if(t >= 8000) return 'Arena 22';
+  if(t >= 7500) return 'Arena 21';
+  if(t >= 7000) return 'Arena 20';
+  if(t >= 6500) return 'Arena 19';
+  if(t >= 6000) return 'Arena 18';
+  if(t >= 5600) return 'Arena 17';
+  if(t >= 5300) return 'Arena 16';
+  if(t >= 5000) return 'Arena 15';
+  return `Arena ${Math.max(1, Math.floor(t/300))}`;
+}
+
+const ARENA_NAME_MAP = {
+  "Goblin Stadium":"Estádio dos Goblins",
+  "Bone Pit":"Fosso de Ossos",
+  "Barbarian Bowl":"Arena dos Bárbaros",
+  "Spell Valley":"Vale das Magias",
+  "Builder's Workshop":"Oficina do Construtor",
+  "Pekka's Playhouse":"Casa de Brincadeira da P.E.K.K.A",
+  "Royal Arena":"Arena Real",
+  "Frozen Peak":"Pico Congelado",
+  "Jungle Arena":"Arena Selvagem",
+  "Hog Mountain":"Montanha do Porco",
+  "Electro Valley":"Vale Elétrico",
+  "Spooky Town":"Cidade Assombrada",
+  "Rascal's Hideout":"Esconderijo dos Patifes",
+  "Serenity Peak":"Pico da Serenidade",
+  "Miner's Mine":"Mina do Mineiro",
+  "Executioner's Kitchen":"Cozinha do Executor",
+  "Royal Crypt":"Cripta Real",
+  "Silent Sanctuary":"Santuário Silencioso",
+  "Dragon Spa":"Spa do Dragão",
+  "Boot Camp":"Campo de Treino",
+  "Clash Fest":"Clash Fest",
+  "Pan-cake Arena":"Arena de Panquecas",
+  "Rumble Road":"Estrada da Rixa",
+  "Electro Buffs":"Bufos Elétricos",
+  "Spooky Circus":"Circo Assombrado",
+  "Secret Valley":"Vale Secreto",
+  "Builder's Kitchen":"Cozinha do Construtor",
+  "Magic Academy":"Escola Mágica",
+  "Spirit Square":"Praça dos Espíritos",
+  "Legendary Arena":"Arena Lendária"
+};
+
+function translateArenaName(name=''){
+  return ARENA_NAME_MAP[name] || name || 'Arena';
+}
+
+function getArenaStageLabel(arena={}){
+  const raw = String(arena?.rawName || '');
+  const m = raw.match(/Arena_L(\d+)/i);
+  if(m) return `Arena ${Number(m[1])}`;
+  return '';
+}
+
+function formatPlayerCompactMeta(profile={}){
+  if(!profile || !profile.name){ return 'Sincronize sua tag para ver troféus e arena.'; }
+  const trophies = Number(profile?.trophies || 0).toLocaleString('pt-BR');
+  const arenaName = translateArenaName(profile?.arena?.name || getArenaLabelFromTrophies(profile?.trophies));
+  const arenaStage = getArenaStageLabel(profile?.arena);
+  return `${trophies} 🏆 | ${arenaName}${arenaStage ? ' - ' + arenaStage : ''}`;
+}
+
+function getDisplayedCardLevel(card={}){
+  const rarity = String(card?.rarity || '').toLowerCase();
+  const level = Number(card?.level || 0);
+  const offset = rarity === 'rare' ? 2 : rarity === 'epic' ? 5 : rarity === 'legendary' ? 8 : rarity === 'champion' ? 10 : 0;
+  const shown = level + offset;
+  return shown || Number(card?.evolutionLevel || card?.maxLevel || 0) || 0;
+}
+
+function cardImage(card={}){
+  return card?.iconUrls?.medium || card?.iconUrls?.evolutionMedium || card?.iconUrls?.large || '';
+}
+
+const RARITY_LABELS_PT = { common:'Comum', rare:'Rara', epic:'Épica', legendary:'Lendária', champion:'Campeã' };
+function translateCardName(name=''){
+  const map = {
+    'Zap':'Zap','Firecracker':'Atiradora','Minion Horde':'Horda de Servos','Sparky':'Sparky','Elite Barbarians':'Bárbaros de Elite','Arrows':'Flechas','Giant Skeleton':'Esqueleto Gigante','Elixir Collector':'Coletor de Elixir','Baby Dragon':'Bebê Dragão','Balloon':'Balão','Freeze':'Gelo','Princess':'Princesa','Bomber':'Bombardeiro','Dagger Duchess':'Duquesa das Adagas'
+  };
+  const key = String(name || '').trim();
+  return map[key] || key.replace(/^The\s+/i,'').trim();
+}
+function translateCardRarity(rarity=''){
+  const key = String(rarity || '').toLowerCase();
+  return RARITY_LABELS_PT[key] || rarity || 'Carta';
+}
+function filterCardsByRarity(cards=[], rarity='all'){
+  if(rarity === 'all') return cards;
+  return cards.filter(card => String(card?.rarity || '').toLowerCase() === rarity);
+}
+
+async function updateDrawerProfileSummary(force=false){
+  const summary = document.getElementById('drawerProfileSummary');
+  if(!summary) return;
+  const access = window.TOPBRS_ACCESS || {};
+  const linkedMember = resolveCurrentLinkedMember();
+  let profile = null;
+  try{ profile = await ensureCurrentPlayerLiveProfile(true); }catch(e){}
+  const name = profile?.name || linkedMember?.name || linkedMember?.nick || (displayLabel ? displayLabel(access) : (access.nick || access.email || 'Usuário'));
+  const compact = profile ? formatPlayerCompactMeta(profile || {}) : 'Sincronize sua tag para ver troféus e arena.';
+  summary.classList.remove('hidden');
+  summary.innerHTML = `<div class="profile-summary-main shimmer-gold"><strong>${esc(name)}</strong><small>${esc(compact)}</small></div>`;
+}
+
+function getRarityClass(rarity=''){
+  const key = String(rarity || '').toLowerCase();
+  return ['common','rare','epic','legendary','champion'].includes(key) ? `rarity-${key}` : 'rarity-common';
+}
+
+function renderDeckCard(card={}){
+  const level = getDisplayedCardLevel(card);
+  const img = cardImage(card);
+  const label = translateCardName(card.name || 'Carta');
+  const rarityClass = getRarityClass(card.rarity || 'common');
+  return `<article class="deck-card ${rarityClass}" title="${esc(label)}"><div class="deck-card-frame ${rarityClass}">${img ? `<img src="${esc(img)}" alt="${esc(label)}" loading="lazy">` : `<div class="deck-card-fallback">${esc(label.slice(0,2).toUpperCase())}</div>`}<span class="deck-level-badge">Nv ${esc(String(level || '—'))}</span></div><div class="deck-card-name">${esc(label)}</div></article>`;
+}
+
+function renderCollectionCard(card={}){
+  const level = getDisplayedCardLevel(card);
+  const img = cardImage(card);
+  const label = translateCardName(card.name || 'Carta');
+  const rarity = translateCardRarity(card.rarity || '');
+  const rarityClass = getRarityClass(card.rarity || 'common');
+  return `<article class="deck-collection-card ${rarityClass}" title="${esc(label)} • ${esc(rarity)}"><div class="deck-collection-frame ${rarityClass}">${img ? `<img src="${esc(img)}" alt="${esc(label)}" loading="lazy">` : `<div class="deck-card-fallback">${esc(label.slice(0,2).toUpperCase())}</div>`}<span class="deck-level-badge">Nv ${esc(String(level || '—'))}</span><span class="deck-rarity-badge ${rarityClass}">${esc(rarity)}</span></div><div class="deck-card-name">${esc(label)}</div></article>`;
+}
+
+async function renderDecksView(force=false){
+  if(!ui.decksMeta || !ui.decksCurrentDeck || !ui.decksCardsGrid) return;
+  const tag = currentAccessPlayerTag();
+  if(!tag){
+    ui.decksMeta.textContent = 'Defina sua tag para visualizar deck e coleção.';
+    ui.decksCurrentDeck.innerHTML = '';
+    ui.decksCardsGrid.innerHTML = '<div class="empty">Sem tag vinculada ao usuário atual.</div>';
+    return;
+  }
+  ui.decksMeta.textContent = 'Carregando deck e cartas do jogador...';
+  try{
+    let profile = null;
+    try{
+      profile = await ensureCurrentPlayerLiveProfile(true);
+    }catch(e){
+      profile = __currentPlayerLiveProfile || null;
+      if(!profile){
+        try{ profile = await ensureCurrentPlayerLiveProfile(false); }catch(err2){}
+      }
+    }
+    if(!profile){
+      ui.decksMeta.textContent = 'API temporariamente indisponível.';
+      ui.decksCurrentDeck.innerHTML = '<div class="empty">Deck atual indisponível.</div>';
+      ui.decksCardsGrid.innerHTML = '<div class="empty">Não foi possível carregar os decks agora.</div>';
+      return;
+    }
+    const currentDeck = Array.isArray(profile.currentDeck) ? profile.currentDeck : [];
+    const cards = Array.isArray(profile.cards) ? profile.cards : [];
+    const compact = `${Number(profile?.trophies || 0).toLocaleString('pt-BR')} 🏆 | ${translateArenaName(profile?.arena?.name || getArenaLabelFromTrophies(profile?.trophies))}${getArenaStageLabel(profile?.arena) ? ' - ' + getArenaStageLabel(profile?.arena) : ''}`;
+    ui.decksMeta.innerHTML = `<div class="war-auto-live-pill decks-live-pill"><strong>${esc(profile?.name || 'Jogador')}</strong><span>${esc(compact)}</span></div>`;
+    ui.decksCurrentDeck.innerHTML = currentDeck.length ? currentDeck.slice(0,8).map(renderDeckCard).join('') : '<div class="empty">Deck atual não disponível agora.</div>';
+    const filteredCards = filterCardsByRarity(cards, currentDecksRarityFilter);
+    const sortedCards = [...filteredCards].sort((a,b) => getDisplayedCardLevel(b) - getDisplayedCardLevel(a) || String(translateCardName(a.name)).localeCompare(String(translateCardName(b.name)), 'pt-BR'));
+    ui.decksCardsGrid.innerHTML = sortedCards.length ? sortedCards.map(renderCollectionCard).join('') : '<div class="empty">Nenhuma carta encontrada nesse filtro.</div>';
+  }catch(err){
+    ui.decksMeta.textContent = 'API temporariamente indisponível.';
+    ui.decksCurrentDeck.innerHTML = '<div class="empty">Deck atual indisponível.</div>';
+    ui.decksCardsGrid.innerHTML = '<div class="empty">Não foi possível carregar os decks agora.</div>';
+  }
+}
+
+
+
+function clearWarAutoRefreshTimer(){
+  if(warAutoRefreshTimer){
+    clearInterval(warAutoRefreshTimer);
+    warAutoRefreshTimer = null;
+  }
+}
+
+async function runWarAutoRefreshCycle(reason='timer'){
+  if(warAutoRefreshBusy) return;
+  if(activeViewId !== 'warAutoView') return;
+  warAutoRefreshBusy = true;
+  try{
+    await renderWarAutoView({ force: true, silent: reason !== 'manual' });
+  }catch(e){
+    console.error('War auto refresh cycle error:', e);
+  }finally{
+    warAutoRefreshBusy = false;
+  }
+}
+
+function startWarAutoRefreshTimer(){
+  clearWarAutoRefreshTimer();
+  if(activeViewId !== 'warAutoView') return;
+  warAutoRefreshTimer = setInterval(() => {
+    runWarAutoRefreshCycle('timer');
+  }, WAR_AUTO_AUTO_REFRESH_MS);
+}
+
+function getRaceParticipantListFromNode(node){
+  if(!node) return [];
+  if(Array.isArray(node.participants)) return node.participants;
+  if(Array.isArray(node.memberList)) return node.memberList;
+  if(Array.isArray(node.members)) return node.members;
+  if(Array.isArray(node.items)) return node.items;
+  return [];
+}
+function resolveCurrentRiverRaceClanNode(raceData={}){
+  const active = typeof activeMembers === 'function' ? activeMembers() : [];
+  const configuredTag = normalizePlayerTag(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ');
+  const candidates = [];
+  if(raceData?.clan) candidates.push(raceData.clan);
+  if(Array.isArray(raceData?.clans)) candidates.push(...raceData.clans);
+  if(Array.isArray(raceData?.items)) candidates.push({ participants: raceData.items, name: raceData.name, tag: raceData.tag });
+  if(Array.isArray(raceData?.participants)) candidates.push({ participants: raceData.participants, name: raceData.name, tag: raceData.tag });
+  const exact = candidates.find(node => normalizePlayerTag(node?.tag || node?.clanTag || '') === configuredTag);
+  if(exact) return exact;
+  const activeTags = new Set(active.map(m => normalizePlayerTag(m.playerTag || m.tag || '')).filter(Boolean));
+  const activeNames = new Set(active.map(m => normalizeMatchText(m.name || m.nick || '')).filter(Boolean));
+  let best = null;
+  let bestScore = -1;
+  for(const node of candidates){
+    const participants = getRaceParticipantListFromNode(node);
+    let score = 0;
+    for(const p of participants){
+      if(activeTags.has(normalizePlayerTag(p?.tag || p?.playerTag || ''))) score += 3;
+      if(activeNames.has(normalizeMatchText(p?.name || p?.nick || ''))) score += 1;
+    }
+    if(score > bestScore){ best = node; bestScore = score; }
+  }
+  return best || candidates[0] || null;
+}
+function getWarAutoParticipantsFromRace(raceData={}){
+  return getRaceParticipantListFromNode(resolveCurrentRiverRaceClanNode(raceData));
+}
+function buildWarAutoApiRowsFromRace(raceData, selection){
+  const participants = getWarAutoParticipantsFromRace(raceData);
+  const currentDay = getCurrentWarDayKey();
+  const active = activeMembers();
+  const byTag = new Map(active.map(m => [normalizePlayerTag(m.playerTag || m.tag || ''), m]));
+  const byName = new Map(active.map(m => [normalizeMatchText(m.name || m.nick || ''), m]));
+  return participants.map((p, index) => {
+    const playerTag = normalizePlayerTag(p.tag || p.playerTag || '');
+    const member = byTag.get(playerTag) || byName.get(normalizeMatchText(p.name || p.nick || '')) || {};
+    const total = Number(p.decksUsed ?? p.battlesPlayed ?? p.total ?? p.decksUsedToday ?? 0);
+    const points = Number(p.fame || p.points || 0) + Number(p.repairPoints || 0);
+    const row = {
+      playerTag: normalizePlayerTag(playerTag || member.playerTag || member.tag || ''),
+      tag: normalizePlayerTag(playerTag || member.playerTag || member.tag || ''),
+      name: member.name || p.name || member.nick || 'Sem nome',
+      role: member.role || p.role || 'Membro',
+      thu: 0, fri: 0, sat: 0, sun: 0,
+      total,
+      points,
+      livePoints: points,
+      decksUsedToday: Number(p.decksUsedToday || 0),
+      apiLive: true,
+      source: 'api-live',
+      weekId: `${monthLabel(selection.month)} • Semana ${selection.week}`
+    };
+    if(currentDay) row[currentDay] = Number(p.decksUsedToday || 0);
+    return row;
+  });
+}
+
+function mergeWarAutoRows(manualRows, apiRows){
+  const merged = new Map((manualRows || []).map(r => [normalizePlayerTag(r.playerTag || '' ) || normalizeMatchText(r.name), { ...r, apiLive:false, points: Number(r.points||0) }]));
+  for(const apiRow of (apiRows || [])){
+    const key = normalizePlayerTag(apiRow.playerTag || '') || normalizeMatchText(apiRow.name);
+    const base = merged.get(key) || { thu:0,fri:0,sat:0,sun:0,total:0,name:apiRow.name,role:apiRow.role,playerTag:apiRow.playerTag };
+    const next = { ...base, ...apiRow };
+    ['thu','fri','sat','sun'].forEach(day => { if(apiRow[day] != null && apiRow[day] !== 0) next[day] = Number(apiRow[day]); });
+    const computed = ['thu','fri','sat','sun'].reduce((sum, day)=> sum + Number(next[day]||0), 0);
+    next.total = Math.max(Number(apiRow.total || 0), computed);
+    merged.set(key, next);
+  }
+  return Array.from(merged.values());
+}
+
+const state = loadState();
+state.ui ||= {};
+state.notifications ||= {};
+state.notifications.memberAlerts ||= [];
+state.ui.seenRealtimeNotificationIds ||= {};
+state.ui.activeNotificationId ||= '';
+state.ui.lastSyncAt ||= new Date().toISOString();
+state.ui.warAutoExpanded ||= {};
+state.ui.membersRoleFilter ||= 'ALL';
+state.ui.membersStatusFilter ||= 'ALL';
+state.ui.membersSearch ||= '';
+state.ui.membersSort ||= 'points';
+state.ui.membersCollapsed ||= {};
+const ui = {
+  monthSelect: $('#monthSelect'),
+  weekSelect: $('#weekSelect'),
+  usersBoard: $('#usersBoard'),
+  monthChipBar: $('#monthChipBar'),
+  weekChipBar: $('#weekChipBar'),
+  arenaMonthChipBar: $('#arenaMonthChipBar'),
+  eliteMonthChipBar: $('#eliteMonthChipBar'),
+  kpiGrid: $('#kpiGrid'),
+  podium: $('#podium'),
+  goalPanel: $('#goalPanel'),
+  rankingList: $('#rankingList'),
+  leaderActions: $('#leaderActions'),
+  annualPulse: $('#annualPulse'),
+  warBoard: $('#warBoard'),
+  warAutoStats: $('#warAutoStats'),
+  warAutoMeta: $('#warAutoMeta'),
+  warAutoBoard: $('#warAutoBoard'),
+  warAutoRefreshBtn: $('#warAutoRefreshBtn'),
+  warRankingMeta: $('#warRankingMeta'),
+  warRankingBoard: $('#warRankingBoard'),
+  warRankingMonthChipBar: $('#warRankingMonthChipBar'),
+  warRankingWeekChipBar: $('#warRankingWeekChipBar'),
+  warRankingRefreshBtn: $('#warRankingRefreshBtn'),
+  membersSyncMeta: $('#membersSyncMeta'),
+  membersSyncBoard: $('#membersSyncBoard'),
+  membersSyncRefreshBtn: $('#membersSyncRefreshBtn'),
+  membersSyncLastSync: $('#membersSyncLastSync'),
+  membersSyncLastSyncStatus: $('#membersSyncLastSyncStatus'),
+  membersSyncCount: $('#membersSyncCount'),
+  membersSyncEligible: $('#membersSyncEligible'),
+  apiLogsMeta: $('#apiLogsMeta'),
+  apiLogsBoard: $('#apiLogsBoard'),
+  apiLogsRefreshBtn: $('#apiLogsRefreshBtn'),
+  hubLeaderSummary: $('#hubLeaderSummary'),
+  hubRiskMeta: $('#hubRiskMeta'),
+  hubRiskBoard: $('#hubRiskBoard'),
+  hubDecisionMeta: $('#hubDecisionMeta'),
+  hubDecisionBoard: $('#hubDecisionBoard'),
+  hubMonthChipBar: $('#hubMonthChipBar'),
+  hubWeekChipBar: $('#hubWeekChipBar'),
+  hubClanMeta: $('#hubClanMeta'),
+  hubClanSummary: $('#hubClanSummary'),
+  hubClanBoard: $('#hubClanBoard'),
+  warAutoPrepareBtn: $('#warAutoPrepareBtn'),
+  warAutoMonthChipBar: $('#warAutoMonthChipBar'),
+  warAutoWeekChipBar: $('#warAutoWeekChipBar'),
+  tournamentMonthChipBar: $('#tournamentMonthChipBar'),
+  tournamentWeekChipBar: $('#tournamentWeekChipBar'),
+  tournamentEditor: $('#tournamentEditor'),
+  tournamentBoard: $('#tournamentBoard'),
+  classificationMonthSelect: $('#classificationMonthSelect'),
+  classificationBoard: $('#classificationBoard'),
+  classificationDetailModal: $('#classificationDetailModal'),
+  classificationDetailBody: $('#classificationDetailBody'),
+  eliteBoard: $('#eliteBoard'),
+  historyBoard: $('#historyBoard'),
+  membersGrid: $('#membersGrid'),
+  membersPremiumStats: $('#membersPremiumStats'),
+  membersRoleFilters: $('#membersRoleFilters'),
+  membersStatusFilters: $('#membersStatusFilters'),
+  membersSearchInput: $('#membersSearchInput'),
+  membersSortSelect: $('#membersSortSelect'),
+  memberModal: $('#memberModal'),
+  memberModalBody: $('#memberModalBody'),
+  userEditModal: $('#userEditModal'),
+  userEditBody: $('#userEditBody'),
+  createMemberModal: $('#createMemberModal'),
+  createMemberForm: $('#createMemberForm'),
+  createMemberName: $('#createMemberName'),
+  createMemberNick: $('#createMemberNick'),
+  createMemberTag: $('#createMemberTag'),
+  createMemberRole: $('#createMemberRole'),
+  goalModal: $('#goalModal'),
+  vaultInsights: $('#vaultInsights'),
+  heroMonth: $('#heroMonth'),
+  heroClanName: $('#heroClanName'),
+  heroSync: $('#heroSync'),
+  installBtn: $('#installBtn'),
+  sideDrawer: $('#sideDrawer'),
+  drawerBackdrop: $('#drawerBackdrop'),
+  menuToggleBtn: $('#menuToggleBtn'),
+  menuHint: $('#menuHint'),
+  backToTopBtn: $('#backToTopBtn'),
+  currentViewBadge: $('#currentViewBadge'),
+  viewMenuDropdown: $('#viewMenuDropdown'),
+  heroSection: $('.hero'),
+  weekHeroPicker: $('#weekHeroPicker'),
+  archivedBoard: $('#archivedBoard'),
+  decksMeta: $('#decksMeta'),
+  decksCurrentDeck: $('#decksCurrentDeck'),
+  decksCardsGrid: $('#decksCardsGrid'),
+  decksFilterBar: $('#decksFilterBar'),
+  memberActionModal: $('#memberActionModal'),
+  memberActionBody: $('#memberActionBody'),
+  vaultAccessModal: $('#vaultAccessModal'),
+  vaultAccessForm: $('#vaultAccessForm'),
+  vaultPasswordInput: $('#vaultPasswordInput'),
+  vaultAccessError: $('#vaultAccessError'),
+  vaultAccessCancelBtn: $('#vaultAccessCancelBtn'),
+  drawerNotificationBtn: $('#drawerNotificationBtn'),
+  drawerNotificationBadge: $('#drawerNotificationBadge'),
+  drawerEditMenuBtn: $('#drawerEditMenuBtn'),
+  drawerEditMenuActions: $('#drawerEditMenuActions'),
+  drawerSaveMenuBtn: $('#drawerSaveMenuBtn'),
+  drawerCancelMenuBtn: $('#drawerCancelMenuBtn'),
+  alertComposerModal: $('#alertComposerModal'),
+  alertComposerTitle: $('#alertComposerTitle'),
+  alertComposerBody: $('#alertComposerBody'),
+  notificationCenterModal: $('#notificationCenterModal'),
+  notificationCenterMeta: $('#notificationCenterMeta'),
+  notificationCenterList: $('#notificationCenterList'),
+  memberAlertModal: $('#memberAlertModal'),
+  memberAlertTitle: $('#memberAlertTitle'),
+  memberAlertMessage: $('#memberAlertMessage'),
+  memberAlertMeta: $('#memberAlertMeta')
+};
+
+let rankMode = 'elite';
+let warFilter = 'all';
+let classificationDetailLookup = new Map();
+let touchMenuState = null;
+const VAULT_PASSWORD = 'liderestopbrs';
+setupDeckFilters();
+const VAULT_SESSION_KEY = 'topbrs-vault-unlocked';
+let lastNonVaultView = 'arenaView';
+
+const DRAWER_MENU_ORDER_KEY = 'topbrs-drawer-menu-order-v1';
+let drawerMenuEditMode = false;
+let drawerMenuWorkingOrder = [];
+
+function getDrawerMenuStorageKey(){
+  return `${DRAWER_MENU_ORDER_KEY}:${currentAccessUid() || currentAccessEmail() || currentAccessNick() || 'guest'}`;
+}
+function readDrawerMenuOrder(){
+  try{
+    const raw = localStorage.getItem(getDrawerMenuStorageKey());
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  }catch(e){ return []; }
+}
+function saveDrawerMenuOrder(order=[]){
+  try{ localStorage.setItem(getDrawerMenuStorageKey(), JSON.stringify(Array.isArray(order) ? order : [])); }catch(e){}
+}
+function getVisibleDrawerLinks(){
+  return Array.from(document.querySelectorAll('.drawer-menu .drawer-link')).filter(btn => !btn.classList.contains('hidden'));
+}
+function applyDrawerMenuOrder(order=[]){
+  const menu = document.querySelector('.drawer-menu');
+  if(!menu) return;
+  const allLinks = Array.from(menu.querySelectorAll('.drawer-link'));
+  const byView = new Map(allLinks.map(btn => [btn.dataset.view, btn]));
+  const arranged = [];
+  order.forEach(viewId => { const btn = byView.get(viewId); if(btn && !arranged.includes(btn)) arranged.push(btn); });
+  allLinks.forEach(btn => { if(!arranged.includes(btn)) arranged.push(btn); });
+  arranged.forEach(btn => menu.appendChild(btn));
+}
+function renderDrawerMenuEditState(){
+  document.querySelector('.drawer-menu')?.classList.toggle('edit-mode', drawerMenuEditMode);
+  const visibleLinks = getVisibleDrawerLinks();
+  if(!drawerMenuEditMode){
+    visibleLinks.forEach(btn => {
+      btn.removeAttribute('draggable');
+      const ctl = btn.querySelector('.drawer-link-controls');
+      if(ctl) ctl.remove();
+    });
+    ui.drawerEditMenuActions?.classList.add('hidden');
+    return;
+  }
+  ui.drawerEditMenuActions?.classList.remove('hidden');
+  drawerMenuWorkingOrder = visibleLinks.map(btn => btn.dataset.view);
+  visibleLinks.forEach((btn, idx) => {
+    btn.removeAttribute('draggable');
+    let ctl = btn.querySelector('.drawer-link-controls');
+    if(!ctl){
+      ctl = document.createElement('div');
+      ctl.className = 'drawer-link-controls';
+      ctl.innerHTML = `
+        <button type="button" class="drawer-sort-btn" data-drawer-move="up" aria-label="Mover para cima">↑</button>
+        <button type="button" class="drawer-sort-btn" data-drawer-move="down" aria-label="Mover para baixo">↓</button>
+      `;
+      btn.appendChild(ctl);
+    }
+    ctl.querySelector('[data-drawer-move="up"]').disabled = idx === 0;
+    ctl.querySelector('[data-drawer-move="down"]').disabled = idx === visibleLinks.length - 1;
+  });
+}
+function refreshDrawerMenuCustomization(){
+  applyDrawerMenuOrder(readDrawerMenuOrder());
+  renderDrawerMenuEditState();
+}
+function setDrawerMenuEditMode(enabled){
+  drawerMenuEditMode = !!enabled;
+  ui.drawerEditMenuBtn?.classList.toggle('active', drawerMenuEditMode);
+  ui.drawerEditMenuBtn?.classList.toggle('hidden', drawerMenuEditMode);
+  renderDrawerMenuEditState();
+}
+function moveDrawerLink(viewId='', direction='up'){
+  const visible = getVisibleDrawerLinks();
+  const order = visible.map(btn => btn.dataset.view);
+  const idx = order.indexOf(viewId);
+  if(idx === -1) return;
+  const target = direction === 'up' ? idx - 1 : idx + 1;
+  if(target < 0 || target >= order.length) return;
+  [order[idx], order[target]] = [order[target], order[idx]];
+  applyDrawerMenuOrder(order);
+  drawerMenuWorkingOrder = order.slice();
+  renderDrawerMenuEditState();
+}
+
+let __topbrsRemoteNotifications = [];
+let __topbrsRemotePresence = {};
+let __topbrsNotificationsReady = false;
+let __topbrsPresenceReady = false;
+let __topbrsNotifUnsub = null;
+let __topbrsPresenceUnsub = null;
+let __topbrsPresenceHeartbeat = null;
+
+
+const viewLabels = {
+  arenaView:'Arena 🏟️',
+  warView:'Guerra ⚔️',
+  warAutoView:'Guerra Auto 🤖',
+  membersSyncView:'Sync 🔄',
+  apiLogsView:'Logs API 🛰️',
+  hubLeaderView:'Hub dos Líderes 🧑🏼‍💻',
+  hubRiskView:'Risco automático ⚠️',
+  hubDecisionView:'Decisões automáticas 🧠',
+  hubClanView:'Acompanhamento do clã 📊',
+  tournamentView:'Torneio 🏆',
+  classificationView:'Classificação 📊',
+  eliteView:'Elite 👑',
+  membersView:'Membros 👥',
+  vaultView:'Cofre 🔐',
+  usersView:'Usuários 🪪',
+  archivedView:'Arquivados 📦',
+  decksView:'Decks 🃏'
+};
+
+function currentAccessRole(){
+  return window.TOPBRS_ACCESS?.accessRole || 'viewer';
+}
+function canEditApp(){
+  return ['admin','editor'].includes(currentAccessRole());
+}
+function isAdminApp(){
+  return currentAccessRole() === 'admin';
+}
+function currentAccessUid(){
+  return String(window.TOPBRS_ACCESS?.uid || '');
+}
+function currentAccessEmail(){
+  return String(window.TOPBRS_ACCESS?.email || '').trim().toLowerCase();
+}
+function currentAccessNick(){
+  return String(window.TOPBRS_ACCESS?.nick || '').trim().toLowerCase();
+}
+function currentAccessPlayerTag(){
+  const linkedMember = resolveCurrentLinkedMember();
+  return normalizePlayerTag(window.TOPBRS_ACCESS?.playerTag || linkedMember?.playerTag || linkedMember?.tag || '');
+}
+function currentAccessLinkedMemberName(){
+  return String(window.TOPBRS_ACCESS?.linkedMemberName || '').trim().toLowerCase();
+}
+function memberMatchesCurrentUser(member){
+  if(!member) return false;
+  if(member.ghostAdmin) return false;
+  const uid = currentAccessUid();
+  const email = currentAccessEmail();
+  const nick = currentAccessNick();
+  const linkedMemberName = currentAccessLinkedMemberName();
+  const accessTag = currentAccessPlayerTag();
+  const authUsers = Array.isArray(state?.authUsers) ? state.authUsers : [];
+  const profile = authUsers.find(user => String(user.uid || '') === uid) || null;
+  const memberNames = [member.name, member.nick, member.fullName, member.linkedMemberName].map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
+  const memberTag = normalizePlayerTag(member.playerTag || member.tag || '');
+  if(uid && String(member.linkedAuthUid || '') === uid) return true;
+  if(email && String(member.linkedEmail || '').trim().toLowerCase() === email) return true;
+  if(accessTag && memberTag && accessTag === memberTag) return true;
+  if(linkedMemberName && memberNames.includes(linkedMemberName)) return true;
+  if(profile){
+    const profileNames = [profile.nick, profile.name, profile.email, profile.linkedMemberName].map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
+    if(profileNames.some(value => memberNames.includes(value))) return true;
+    const profileTag = normalizePlayerTag(profile.playerTag || '');
+    if(profileTag && memberTag && profileTag === memberTag) return true;
+  }
+  if(nick && memberNames.includes(nick)) return true;
+  if(email && memberNames.includes(email)) return true;
+  return false;
+}
+function canEditMemberProfile(member){
+  return isAdminApp() || memberMatchesCurrentUser(member);
+}
+function canAdjustPointsForMember(member){
+  if(isAdminApp()) return true;
+  if(currentAccessRole() === 'editor' && memberMatchesCurrentUser(member)) return false;
+  return canEditApp();
+}
+function ensureCanAdjustPointsForMember(member, context='pontuação'){
+  const allowed = canAdjustPointsForMember(member);
+  if(!allowed){
+    showToast(`Você não pode alterar sua própria ${context}.`, 'error');
+  }
+  return allowed;
+}
+function nextPromotedRole(role='Membro'){
+  if(role === 'Membro') return 'Ancião';
+  if(role === 'Ancião') return 'Co-líder';
+  if(role === 'Co-líder') return 'Líder';
+  return 'Líder';
+}
+function nextDemotedRole(role='Membro'){
+  if(role === 'Líder') return 'Co-líder';
+  if(role === 'Co-líder') return 'Ancião';
+  if(role === 'Ancião') return 'Membro';
+  return 'Membro';
+}
+
+function updateTopbarTitle(viewId){
+  if(!ui.currentViewBadge) return;
+  ui.currentViewBadge.textContent = viewLabels[viewId] || 'Arena 🏟️';
+}
+
+function setupDeckFilters(){
+  if(!ui.decksFilterBar) return;
+  ui.decksFilterBar.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-rarity]');
+    if(!btn) return;
+    currentDecksRarityFilter = String(btn.dataset.rarity || 'all');
+    ui.decksFilterBar.querySelectorAll('[data-rarity]').forEach(node => node.classList.toggle('active', node === btn));
+    renderDecksView();
+  });
+}
+
+function showMenuHint(){
+  const hint = ui.menuHint;
+  if(!hint) return;
+  hint.classList.remove('hidden');
+  requestAnimationFrame(()=> hint.classList.add('show'));
+  clearTimeout(showMenuHint._timer);
+  showMenuHint._timer = setTimeout(()=> { hint.classList.remove('show'); }, 3000);
+}
+function encodedParts(payload, count){
+  const raw = String(payload || '').split('|');
+  const first = decodeURIComponent(raw.shift() || '');
+  return [first, ...raw].slice(0, count);
+}
+function toggleViewMenu(force){
+  openDrawer(force);
+}
+function deepClone(obj){ return JSON.parse(JSON.stringify(obj)); }
+function readStoredState(key){
+  try{
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){
+    return null;
+  }
+}
+function blankWeekRecord(name, role='Membro'){
+  return {
+    name,
+    role,
+    days:{
+      quinta:{attacks:[false,false,false,false],total:0,fourFour:false},
+      sexta:{attacks:[false,false,false,false],total:0,fourFour:false},
+      sabado:{attacks:[false,false,false,false],total:0,fourFour:false},
+      domingo:{attacks:[false,false,false,false],total:0,fourFour:false}
+    },
+    attacksTotal:0,
+    days44:0,
+    clinchit:false
+  };
+}
+function blankTournamentRecord(name){
+  return {
+    name,
+    weeks:[1,2,3,4].map(() => ({participated:false,position:null,points:0})),
+    pointsMonth:0,top3Month:0,observation:'EM CURSO'
+  };
+}
+function mergeMonthData(baseMonth, savedMonth){
+  const merged = deepClone(baseMonth || {weeks:{},tournament:{},summaryOriginal:{}});
+  if(!savedMonth || typeof savedMonth !== 'object') return merged;
+  merged.summaryOriginal = {...(merged.summaryOriginal||{}), ...(savedMonth.summaryOriginal||{})};
+  merged.weeks ||= {};
+  for(let week=1; week<=4; week++){
+    const key = String(week);
+    merged.weeks[key] = {...(merged.weeks[key]||{}), ...deepClone(savedMonth.weeks?.[key] || {})};
+  }
+  merged.tournament = {...(merged.tournament||{}), ...deepClone(savedMonth.tournament || {})};
+  return merged;
+}
+function mergeWithSeed(saved){
+  const base = deepClone(seedData);
+  const imported = saved && typeof saved === 'object' ? saved : {};
+
+  const validMonths = new Set(seedData.meta.months || []);
+  base.meta = {...base.meta, ...(imported.meta || {})};
+  base.meta.version = appVersion;
+  base.meta.currentMonth = validMonths.has(imported.meta?.currentMonth) ? imported.meta.currentMonth : seedData.meta.currentMonth;
+  base.meta.currentWeek = [1,2,3,4].includes(Number(imported.meta?.currentWeek)) ? Number(imported.meta.currentWeek) : 1;
+
+  base.goals = {...(base.goals || {}), ...(imported.goals || {})};
+
+  const seedMembers = Array.isArray(base.members) ? base.members : [];
+  const savedMembers = Array.isArray(imported.members) ? imported.members : [];
+  const savedByName = new Map(savedMembers.map(member => [member.name, member]));
+  const mergedMembers = seedMembers.map(member => {
+    const savedMember = savedByName.get(member.name) || {};
+    return {
+      ...member,
+      ...savedMember,
+      notes: {...(member.notes || {}), ...(savedMember.notes || {})}
+    };
+  });
+  for(const savedMember of savedMembers){
+    if(!mergedMembers.some(member => member.name === savedMember.name)){
+      mergedMembers.push(savedMember);
+    }
+  }
+  base.members = mergedMembers;
+
+  base.months ||= {};
+  const savedMonths = imported.months || {};
+  for(const month of seedData.meta.months){
+    base.months[month] = mergeMonthData(base.months[month], savedMonths[month]);
+  }
+
+  for(const [month, monthData] of Object.entries(savedMonths)){
+    if(!base.months[month]) base.months[month] = mergeMonthData({weeks:{}, tournament:{}, summaryOriginal:{}}, monthData);
+  }
+
+  base.history = Array.isArray(imported.history) ? imported.history : [];
+  base.authUsers = Array.isArray(imported.authUsers) ? imported.authUsers : (Array.isArray(state?.authUsers) ? deepClone(state.authUsers) : []);
+  base.ui = {...(imported.ui || {}), lastSync: imported.ui?.lastSync || new Date().toISOString(), migratedFrom: imported.meta?.version || imported.meta?.appVersion || 'seed'};
+  base.ui.classificationMonth = validMonths.has(imported.ui?.classificationMonth) ? imported.ui.classificationMonth : base.meta.currentMonth;
+  base.ui.classificationRole = imported.ui?.classificationRole || 'ALL';
+  base.ui.classificationQuery = imported.ui?.classificationQuery || '';
+  base.ui.classificationMode = imported.ui?.classificationMode || 'geral';
+  base.ui.classificationWeek = [1,2,3,4].includes(Number(imported.ui?.classificationWeek)) ? Number(imported.ui.classificationWeek) : (base.meta.currentWeek || 1);
+  base.ui.warQuery = imported.ui?.warQuery || '';
+  base.ui.warRole = imported.ui?.warRole || 'ALL';
+  base.ui.tournamentQuery = imported.ui?.tournamentQuery || '';
+  base.ui.tournamentRole = imported.ui?.tournamentRole || 'ALL';
+  base.ui.warCollapsed = imported.ui?.warCollapsed && typeof imported.ui.warCollapsed === 'object' ? imported.ui.warCollapsed : {};
+  base.ui.tournamentCollapsed = imported.ui?.tournamentCollapsed && typeof imported.ui.tournamentCollapsed === 'object' ? imported.ui.tournamentCollapsed : {};
+  return base;
+}
+function ensureDataCompleteness(data){
+  data.meta ||= {};
+  data.meta.version = appVersion;
+  data.meta.currentMonth ||= seedData.meta.currentMonth;
+  data.meta.currentWeek = [1,2,3,4].includes(Number(data.meta.currentWeek)) ? Number(data.meta.currentWeek) : 1;
+  data.goals ||= {};
+  data.members ||= [];
+  data.months ||= {};
+  data.history ||= [];
+  data.ui ||= {lastSync:new Date().toISOString()};
+  data.ui.classificationMonth ||= data.meta.currentMonth;
+  data.ui.classificationRole ||= 'ALL';
+  data.ui.classificationQuery ||= '';
+  data.ui.classificationMode ||= 'geral';
+  data.ui.classificationWeek = [1,2,3,4].includes(Number(data.ui.classificationWeek)) ? Number(data.ui.classificationWeek) : (data.meta.currentWeek || 1);
+  data.ui.warQuery ||= '';
+  data.ui.warRole ||= 'ALL';
+  data.ui.tournamentQuery ||= '';
+  data.ui.tournamentRole ||= 'ALL';
+  data.authUsers ||= [];
+  data.ui.warCollapsed ||= {};
+  data.ui.tournamentCollapsed ||= {};
+  data.ui.warAutoMonth ||= data.meta.currentMonth;
+  data.ui.warAutoWeek = [1,2,3,4].includes(Number(data.ui.warAutoWeek)) ? Number(data.ui.warAutoWeek) : data.meta.currentWeek;
+  data.ui.localRevision = Number(data.ui.localRevision || 0);
+
+  for(const month of seedData.meta.months){
+    data.goals[month] ||= deepClone(seedData.goals?.[month] || {attacks:1200,tournament:80});
+    data.months[month] ||= {weeks:{}, tournament:{}, summaryOriginal:{}};
+    data.months[month].weeks ||= {};
+    data.months[month].tournament ||= {};
+    for(let week=1; week<=4; week++){
+      const key = String(week);
+      data.months[month].weeks[key] ||= {};
+      for(const member of data.members){
+        data.months[month].weeks[key][member.name] ||= blankWeekRecord(member.name, member.role);
+      }
+    }
+    for(const member of data.members){
+      data.months[month].tournament[member.name] ||= blankTournamentRecord(member.name);
+    }
+  }
+  return data;
+}
+function loadState(){
+  const current = readStoredState(STORAGE_KEY);
+  if(current){
+    return ensureDataCompleteness(mergeWithSeed(current));
+  }
+  for(const legacyKey of LEGACY_STORAGE_KEYS){
+    const legacy = readStoredState(legacyKey);
+    if(legacy){
+      const migrated = ensureDataCompleteness(mergeWithSeed(legacy));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+return migrated;
+    }
+  }
+  const fresh = ensureDataCompleteness(deepClone(seedData));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+return fresh;
+}
+function hydrateSeed(data){
+  return ensureDataCompleteness(mergeWithSeed(data));
+}
+function saveState(){
+  state.ui.localRevision = Number(state.ui.localRevision || 0) + 1;
+  state.ui.lastSync = new Date().toISOString();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+if(ui.heroSync) ui.heroSync.textContent = 'salvo ' + new Date(state.ui.lastSync).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  window.TOPBRS_REMOTE?.onLocalSave?.(deepClone(state));
+}
+
+function $(sel){ return document.querySelector(sel); }
+function $all(sel){ return Array.from(document.querySelectorAll(sel)); }
+function esc(text){
+  return String(text ?? '').replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
+}
+function monthLabel(m){ const key = canonicalMonthKey(m); return monthLabels[key] || m; }
+function slugify(text){
+  return String(text ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g,'-')
+    .replace(/^-+|-+$/g,'');
+}
+function roleOptionsHtml(selected='ALL'){
+  const roles = ['ALL', ...new Set(activeMembers().map(member => member.role || 'Membro'))];
+  return roles.map(role => `<option value="${esc(role)}" ${role===selected?'selected':''}>${role==='ALL'?'Todos os cargos':esc(role)}</option>`).join('');
+}
+function filteredSummariesForTools(ctx, mode){
+  const query = ((mode === 'war' ? state.ui.warQuery : state.ui.tournamentQuery) || '').trim().toLowerCase();
+  const role = mode === 'war' ? (state.ui.warRole || 'ALL') : (state.ui.tournamentRole || 'ALL');
+  return ctx.summaries.filter(item => {
+    const matchQuery = !query || item.member.name.toLowerCase().includes(query);
+    const matchRole = role === 'ALL' || item.member.role === role;
+    return matchQuery && matchRole;
+  });
+}
+function renderToolQuickbar(mode, count){
+  const query = mode === 'war' ? (state.ui.warQuery || '') : (state.ui.tournamentQuery || '');
+  const role = mode === 'war' ? (state.ui.warRole || 'ALL') : (state.ui.tournamentRole || 'ALL');
+  const title = mode === 'war' ? 'Filtro rápido da guerra' : 'Filtro rápido do torneio';
+  const subtitle = mode === 'war'
+    ? 'Ache um membro e marque os ataques sem rolar tudo.'
+    : 'Ache um membro e marque a pontuação do torneio mais rápido.';
+  return `
+    <div class="tool-quickbar sticky-toolbar ${mode==='war' ? 'war-quickbar' : 'tournament-quickbar'}">
+      <div class="tool-quickbar-copy">
+        <strong>${title}</strong>
+        <small>${subtitle} ${count} visível(is).</small>
+      </div>
+      <label class="field compact">
+        <span>Buscar</span>
+        <input type="search" placeholder="Digite o nome..." value="${esc(query)}" data-tool-query="${mode}">
+      </label>
+      <label class="field compact">
+        <span>Cargo</span>
+        <select data-tool-role="${mode}">
+          ${roleOptionsHtml(role)}
+        </select>
+      </label>
+      <div class="tool-quickbar-actions">
+        <button class="ghost small" data-tool-clear="${mode}">Limpar</button>
+      </div>
+    </div>
+  `;
+}
+
+function applyToolFilters(mode){
+  const query = ((mode === 'war' ? state.ui.warQuery : state.ui.tournamentQuery) || '').trim().toLowerCase();
+  const role = mode === 'war' ? (state.ui.warRole || 'ALL') : (state.ui.tournamentRole || 'ALL');
+  const container = mode === 'war' ? ui.warBoard : ui.tournamentEditor;
+  if(!container) return;
+  const rows = [...container.querySelectorAll(mode === 'war' ? '.war-row' : '.tour-row')];
+  let visible = 0;
+  rows.forEach(row => {
+    const name = (row.dataset.memberName || '').toLowerCase();
+    const rowRole = row.dataset.memberRole || '';
+    const matchQuery = !query || name.includes(query);
+    const matchRole = role === 'ALL' || rowRole === role;
+    const show = matchQuery && matchRole;
+    row.style.display = show ? '' : 'none';
+    if(show) visible += 1;
+  });
+  const small = container.querySelector('.tool-quickbar-copy small');
+  if(small){
+    small.textContent = (mode === 'war'
+      ? 'Ache um membro e marque os ataques sem rolar tudo.'
+      : 'Ache um membro e marque a pontuação do torneio mais rápido.') + ` ${visible} visível(is).`;
+  }
+  const empty = container.querySelector(mode === 'war' ? '.war-inline-empty' : '.tour-inline-empty');
+  if(empty) empty.remove();
+  if(!visible){
+    const div = document.createElement('div');
+    div.className = mode === 'war' ? 'empty war-inline-empty' : 'empty tour-inline-empty';
+    div.textContent = 'Nenhum membro encontrado nesse filtro.';
+    container.appendChild(div);
+  }
+}
+
+function collapseStore(mode){
+  if(mode === 'war'){
+    state.ui.warCollapsed ||= {};
+    return state.ui.warCollapsed;
+  }
+  state.ui.tournamentCollapsed ||= {};
+  return state.ui.tournamentCollapsed;
+}
+function isCollapsed(mode, memberName){
+  const store = collapseStore(mode);
+  return store[memberName] !== false;
+}
+function toggleMemberCollapse(mode, memberName){
+  const store = collapseStore(mode);
+  const currentlyCollapsed = isCollapsed(mode, memberName);
+  store[memberName] = !currentlyCollapsed ? true : false;
+  saveState();
+  rebuildLegacyWarStateFromHistory().then(() => render());
+}
+
+function roleWeight(role){
+  if(/líder/i.test(role)) return 4;
+  if(/co-líder/i.test(role)) return 3;
+  if(/ancião/i.test(role)) return 2;
+  return 1;
+}
+function activeMembers(includeArchived=false){
+  return state.members.filter(m => {
+    if(m.ghostAdmin) return false;
+    return includeArchived ? true : m.status !== 'ARQUIVADO';
+  });
+}
+
+function ensureWarHistoryMirror(){
+  state.warHistoryMirror ||= {};
+  return state.warHistoryMirror;
+}
+function setWarHistoryMirrorRows(month, week, rows=[]){
+  const mirror = ensureWarHistoryMirror();
+  const key = canonicalMonthKey(month) || String(month || '').trim().toUpperCase();
+  mirror[key] ||= {};
+  mirror[key][String(week)] = Array.isArray(rows) ? rows.map(r => ({...r})) : [];
+}
+function getWarHistoryMirrorRows(month, week){
+  const mirror = ensureWarHistoryMirror();
+  const key = canonicalMonthKey(month) || String(month || '').trim().toUpperCase();
+  return Array.isArray(mirror?.[key]?.[String(week)]) ? mirror[key][String(week)].map(r => ({...r})) : [];
+}
+function clearFutureWarHistoryMirror(){
+  const current = getRealCurrentWarSelection();
+  const monthOrder = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
+  const currentMonthNum = Number(monthToNumber(current.month) || 0);
+  const mirror = ensureWarHistoryMirror();
+  for(const month of monthOrder){
+    const monthNum = Number(monthToNumber(month) || 0);
+    if(currentMonthNum > 0 && monthNum > currentMonthNum){
+      mirror[month] = {'1':[],'2':[],'3':[],'4':[]};
+    }
+  }
+}
+function buildWeekRecordFromMirrorRows(memberName, rows=[]){
+  const record = {
+    name: memberName,
+    days:{
+      quinta:{attacks:[false,false,false,false],total:0,fourFour:false},
+      sexta:{attacks:[false,false,false,false],total:0,fourFour:false},
+      sabado:{attacks:[false,false,false,false],total:0,fourFour:false},
+      domingo:{attacks:[false,false,false,false],total:0,fourFour:false}
+    },
+    attacksTotal:0,
+    days44:0,
+    clinchit:false,
+    livePoints:0,
+    liveSource:'war_history',
+    liveUpdatedAt:null,
+    playerTag:''
+  };
+  const row = (rows || []).find(r => String(r.linkedMember?.name || r.name || '').trim().toLowerCase() === String(memberName || '').trim().toLowerCase());
+  if(!row) return recomputeWeekRecord(record);
+  const mapped = {
+    quinta: Math.max(0, Math.min(4, Number(row.thu || 0))),
+    sexta: Math.max(0, Math.min(4, Number(row.fri || 0))),
+    sabado: Math.max(0, Math.min(4, Number(row.sat || 0))),
+    domingo: Math.max(0, Math.min(4, Number(row.sun || 0)))
+  };
+  for(const day of dayOrder){
+    const total = Number(mapped[day] || 0);
+    record.days[day].attacks = Array.from({length:4}, (_, idx) => idx < total);
+    record.days[day].total = total;
+    record.days[day].fourFour = total === 4;
+  }
+  record.livePoints = Number(row.points || row.livePoints || 0);
+  record.liveSource = String(row.source || 'war_history');
+  record.playerTag = normalizePlayerTag(row.playerTag || row.tag || row.linkedMember?.playerTag || '');
+  return recomputeWeekRecord(record);
+}
+
+function ensureMonth(month){
+  const key = canonicalMonthKey(month) || String(month || '').trim().toUpperCase();
+  state.months[key] ||= {weeks:{},tournament:{},summaryOriginal:{}};
+  state.goals[key] ||= {attacks:1200,tournament:80};
+  for(let week=1;week<=4;week++){
+    state.months[key].weeks[String(week)] ||= {};
+  }
+  return state.months[key];
+}
+function ensureWeekMember(month, week, name){
+  const monthObj = ensureMonth(month);
+  monthObj.weeks[String(week)][name] ||= {
+    name,
+    days:{
+      quinta:{attacks:[false,false,false,false],total:0,fourFour:false},
+      sexta:{attacks:[false,false,false,false],total:0,fourFour:false},
+      sabado:{attacks:[false,false,false,false],total:0,fourFour:false},
+      domingo:{attacks:[false,false,false,false],total:0,fourFour:false}
+    },
+    attacksTotal:0,
+    days44:0,
+    clinchit:false
+  };
+  return monthObj.weeks[String(week)][name];
+}
+function ensureTournamentMember(month, name){
+  const monthObj = ensureMonth(month);
+  monthObj.tournament[name] ||= {
+    name,
+    weeks:[1,2,3,4].map(() => ({participated:false,position:null,points:0})),
+    pointsMonth:0,top3Month:0,observation:'EM CURSO'
+  };
+  return monthObj.tournament[name];
+}
+function recomputeWeekRecord(record){
+  let attacksTotal = 0;
+  let days44 = 0;
+  for(const day of dayOrder){
+    const dayRecord = record.days[day];
+    dayRecord.total = dayRecord.attacks.filter(Boolean).length;
+    dayRecord.fourFour = dayRecord.total === 4;
+    attacksTotal += dayRecord.total;
+    if(dayRecord.fourFour) days44 += 1;
+  }
+  record.attacksTotal = attacksTotal;
+  record.days44 = days44;
+  record.clinchit = attacksTotal === 16;
+  return record;
+}
+function computeTournamentPoints(position, participated){
+  const hasParticipation = !!participated || !!position;
+  if(!hasParticipation) return 0;
+  let points = Number(state.meta.tournamentRules.participation || 0);
+  if(position === 1) points += Number(state.meta.tournamentRules.first || 0);
+  else if(position === 2) points += Number(state.meta.tournamentRules.second || 0);
+  else if(position === 3) points += Number(state.meta.tournamentRules.third || 0);
+  return points;
+}
+
+function hubCurrentDayInfo(){
+  const key = getCurrentWarDayKey();
+  const map = {thu:{label:'Quinta',expected:4,index:0},fri:{label:'Sexta',expected:8,index:1},sat:{label:'Sábado',expected:12,index:2},sun:{label:'Domingo',expected:16,index:3}};
+  return map[key] || {label:'Fora da guerra', expected:0, index:-1};
+}
+function getHubSelectedMonth(){
+  state.ui ||= {};
+  state.ui.hubMonth ||= canonicalMonthKey(state.meta.currentMonth);
+  return canonicalMonthKey(state.ui.hubMonth);
+}
+function getHubSelectedWeek(){
+  state.ui ||= {};
+  state.ui.hubWeek ||= Number(state.meta.currentWeek || 1);
+  return Math.max(1, Math.min(4, Number(state.ui.hubWeek || 1)));
+}
+
+function buildHubContext(){
+  const month = getHubSelectedMonth();
+  const week = getHubSelectedWeek();
+  const ctx = monthContext(month);
+  const dayInfo = hubCurrentDayInfo();
+  const weeklyRows = ctx.summaries.map(item => {
+    const w = item.weekly[week-1];
+    const prevWeek = week > 1 ? item.weekly[week-2] : null;
+    const twoWeeksAvg = item.weekly.slice(Math.max(0, week-2), week).reduce((acc,row)=>acc + Number(row.attacksTotal || 0),0) / Math.max(1, item.weekly.slice(Math.max(0, week-2), week).length);
+    const totalsByDay = [w.days.quinta.total, w.days.sexta.total, w.days.sabado.total, w.days.domingo.total];
+    const todayTotal = dayInfo.index >= 0 ? totalsByDay[dayInfo.index] : 0;
+    const expectedWeek = dayInfo.expected || 0;
+    const totalWeek = Number(w.attacksTotal || 0);
+    const prevWeekTotal = Number(prevWeek?.attacksTotal || 0);
+    const trend = totalWeek - prevWeekTotal;
+    let riskTone = 'safe';
+    let riskLabel = 'Seguro';
+    if(dayInfo.expected > 0){
+      if(todayTotal === 0 && totalWeek <= Math.max(0, expectedWeek-4)){
+        riskTone = 'high'; riskLabel = 'Risco alto';
+      }else if(totalWeek < expectedWeek || todayTotal < 4){
+        riskTone = 'medium'; riskLabel = 'Risco médio';
+      }else if(totalWeek >= expectedWeek && todayTotal === 4){
+        riskTone = 'good'; riskLabel = 'Em dia';
+      }
+      if(expectedWeek === 16 && !w.clinchit){
+        riskTone = totalWeek <= 8 ? 'high' : (riskTone === 'good' ? 'medium' : riskTone);
+        if(totalWeek <= 8) riskLabel = 'Perdeu clinchit';
+      }
+    }
+    let historyRisk = 'Estável';
+    if(week > 1 && trend < -4) historyRisk = 'Queda forte';
+    else if(week > 1 && trend < 0) historyRisk = 'Queda leve';
+    else if(week > 1 && trend > 0) historyRisk = 'Evoluindo';
+
+    let decision = 'Observar';
+    if(riskTone === 'high') decision = 'Cobrar';
+    else if(riskTone === 'good' && item.scoreElite >= 10) decision = 'Bom desempenho';
+    if(item.suggestion === 'PROMOVER') decision = 'Possível promoção';
+    if(item.suggestion === 'EXPULSAR') decision = 'Possível expulsão';
+    return {
+      member: item.member,
+      summary: item,
+      week: w,
+      todayTotal,
+      totalWeek,
+      expectedWeek,
+      riskTone,
+      riskLabel,
+      decision,
+      prevWeekTotal,
+      trend,
+      historyRisk,
+      twoWeeksAvg
+    };
+  });
+  weeklyRows.sort((a,b) => {
+    const toneWeight = {high:3, medium:2, safe:1, good:0};
+    return (toneWeight[b.riskTone] - toneWeight[a.riskTone]) || (b.totalWeek - a.totalWeek) || a.member.name.localeCompare(b.member.name,'pt-BR');
+  });
+  return {month, week, ctx, dayInfo, weeklyRows};
+}
+function renderHubMonthWeekControls(){
+  const month = getHubSelectedMonth();
+  const week = getHubSelectedWeek();
+  if(ui.hubMonthChipBar){
+    ui.hubMonthChipBar.innerHTML = (seedData?.meta?.months || Object.keys(monthLabels)).map(m => `
+      <button type="button" class="hero-chip ${canonicalMonthKey(m)===month ? 'active' : ''}" data-hub-month="${esc(canonicalMonthKey(m))}">${esc(monthLabel(m).slice(0,3))}</button>
+    `).join('');
+  }
+  if(ui.hubWeekChipBar){
+    ui.hubWeekChipBar.innerHTML = [1,2,3,4].map(w => `
+      <button type="button" class="hero-chip ${w===week ? 'active' : ''}" data-hub-week="${w}">S${w}</button>
+    `).join('');
+  }
+}
+
+function getHubUiFilter(key, fallback='all'){
+  state.ui ||= {};
+  return String(state.ui[key] || fallback);
+}
+function setHubUiFilter(key, value='all'){
+  state.ui ||= {};
+  state.ui[key] = String(value || 'all');
+  saveState();
+}
+function getHubRowExpansion(section, memberName=''){
+  state.ui ||= {};
+  state.ui.hubExpanded ||= {};
+  const sectionMap = state.ui.hubExpanded[section] || {};
+  return Boolean(sectionMap[String(memberName || '')]);
+}
+function toggleHubRowExpansion(section, memberName=''){
+  state.ui ||= {};
+  state.ui.hubExpanded ||= {};
+  state.ui.hubExpanded[section] ||= {};
+  const key = String(memberName || '');
+  state.ui.hubExpanded[section][key] = !state.ui.hubExpanded[section][key];
+  saveState();
+}
+function renderHubFilterBar(type, filters=[], active='all'){
+  return `<div class="hub-filterbar">${filters.map(item => `
+    <button type="button" class="hub-filter-chip ${active === item.value ? 'active' : ''}" data-hub-filter-type="${esc(type)}" data-hub-filter-value="${esc(item.value)}">${esc(item.label)}</button>
+  `).join('')}</div>`;
+}
+function renderHubMiniStats(stats=[]){
+  return `<div class="hub-mini-stats">${stats.map(item => `
+    <article class="hub-mini-card ${esc(item.tone || 'blue')}">
+      <small>${esc(item.label)}</small>
+      <strong>${Number(item.value || 0)}</strong>
+    </article>
+  `).join('')}</div>`;
+}
+function renderHubMetaBlock(text=''){
+  return `<div class="hub-meta-block glass">${esc(text)}</div>`;
+}
+function renderHubLeaderView(){
+  if(!ui.hubLeaderSummary) return;
+  renderHubMonthWeekControls();
+  const {dayInfo, weeklyRows, month, week} = buildHubContext();
+  const high = weeklyRows.filter(r => r.riskTone === 'high').length;
+  const medium = weeklyRows.filter(r => r.riskTone === 'medium').length;
+  const zeroToday = weeklyRows.filter(r => r.todayTotal === 0).length;
+  const fullToday = weeklyRows.filter(r => r.todayTotal === 4).length;
+  ui.hubLeaderSummary.innerHTML = `
+    <article class="hub-card glass"><small>Período</small><strong>${esc(monthLabel(month))} • S${week}</strong><span>${esc(dayInfo.label)}</span></article>
+    <article class="hub-card glass"><small>Risco alto</small><strong>${high}</strong><span>Membros para cobrar agora</span></article>
+    <article class="hub-card glass"><small>Risco médio</small><strong>${medium}</strong><span>Atrasados na semana</span></article>
+    <article class="hub-card glass"><small>4/4 hoje</small><strong>${fullToday}</strong><span>${zeroToday} zerados hoje</span></article>
+  `;
+}
+
+function renderHubRiskView(){
+  if(!ui.hubRiskBoard) return;
+  const {dayInfo, weeklyRows, month, week} = buildHubContext();
+  const activeFilter = getHubUiFilter('hubRiskFilter', 'all');
+  const emDia = weeklyRows.filter(item => item.riskTone === 'good').length;
+  const riscoMedio = weeklyRows.filter(item => item.riskTone === 'medium').length;
+  const riscoAlto = weeklyRows.filter(item => item.riskTone === 'high').length;
+  if(ui.hubRiskMeta){
+    ui.hubRiskMeta.innerHTML = [
+      renderHubMiniStats([
+        { label:'Em dia', value:emDia, tone:'good' },
+        { label:'Risco médio', value:riscoMedio, tone:'warn' },
+        { label:'Risco alto / Clinchit', value:riscoAlto, tone:'bad' }
+      ]),
+      renderHubMetaBlock(`${monthLabel(month)} • S${week} • ${dayInfo.label} • análise combinada do dia, semana e histórico.`),
+      renderHubFilterBar('risk', [
+        { value:'all', label:'Todos' },
+        { value:'good', label:'Em dia' },
+        { value:'medium', label:'Risco médio' },
+        { value:'high', label:'Risco alto' }
+      ], activeFilter)
+    ].join('');
+  }
+  const filteredRows = weeklyRows.filter(item => activeFilter === 'all' ? true : item.riskTone === activeFilter);
+  ui.hubRiskBoard.innerHTML = filteredRows.map(item => {
+    const expanded = getHubRowExpansion('risk', item.member.name);
+    return `
+      <article class="hub-compact-row glass ${item.riskTone}">
+        <div class="hub-compact-head">
+          <strong>${esc(item.member.name)}</strong>
+          <button type="button" class="hub-toggle-btn" data-hub-toggle-row="risk|${encodeURIComponent(item.member.name)}" aria-label="${expanded ? 'Recolher' : 'Expandir'}">${expanded ? '▴' : '▾'}</button>
+        </div>
+        ${expanded ? `
+          <div class="hub-compact-body">
+            <div class="hub-compact-banner ${item.riskTone === 'high' ? 'bad' : item.riskTone === 'medium' ? 'warn' : 'good'}">${esc(item.riskLabel)}</div>
+            <div class="hub-compact-chips">
+              <span class="chip blue">${item.todayTotal}/4 hoje</span>
+              <span class="chip">${item.totalWeek}/${item.expectedWeek || 16} esperado</span>
+              <span class="chip">${item.summary.attacksMonth} ataques no mês</span>
+              <span class="chip ${/Queda/.test(item.historyRisk) ? 'bad' : /Evoluindo/.test(item.historyRisk) ? 'good' : 'blue'}">${esc(item.historyRisk)}</span>
+            </div>
+          </div>` : ''}
+      </article>
+    `;
+  }).join('') || '<div class="empty">Nenhum membro nesse filtro.</div>';
+}
+
+const SMART_ALERT_TEMPLATES = {
+  excellent:{ key:'excellent', label:'Desempenho Excelente 🔥', title:'Desempenho Excelente 🔥', tone:'good', message:'Parabéns por ótimos resultados na war, nós valorizamos quem contribui e ajuda o clã a crescer mais e mais! Parabéns 🎉' },
+  good:{ key:'good', label:'Desempenho Bom 🎊', title:'Desempenho Bom 🎊', tone:'blue', message:'Parabéns pelo desempenho, sabemos que você é capaz de mais 🙏🏼' },
+  observation:{ key:'observation', label:'Observação 👀', title:'Observação 👀', tone:'warn', message:'Sabemos que você pode melhorar, não deixe de ajudar nas guerras, você está em observação… Caso receba outro alerta você está correndo risco! 😫' },
+  charge:{ key:'charge', label:'Cobrança 🚨‼️', title:'Cobrança 🚨‼️', tone:'bad', message:'Porfavor, você está deixando de fazer o principal… contribuir na WAR e ficar inativo por muito tempo. Após mais dois alertas de cobrança você será punido! 😡' }
+};
+
+function normalizeAlertName(value=''){
+  return normalizeMatchText(String(value || '').trim());
+}
+function normalizeAlertTag(value=''){
+  return normalizePlayerTag(String(value || '').trim());
+}
+function getMemberAlertsStore(){
+  state.notifications ||= {};
+  state.notifications.memberAlerts ||= [];
+  return state.notifications.memberAlerts;
+}
+function getRealtimeUserKey(){
+  return String(currentAccessUid() || normalizeAlertTag(currentAccessPlayerTag()) || currentAccessEmail() || normalizeAlertName(currentAccessLinkedMemberName()) || normalizeAlertName(currentAccessNick()) || 'anon');
+}
+function buildAlertRecipientKeys(member={}){
+  const keys = new Set();
+  const tag = normalizeAlertTag(member.playerTag || member.tag || '');
+  const name = normalizeAlertName(member.name || member.nick || '');
+  if(tag) keys.add(tag);
+  if(name) keys.add(name);
+  return Array.from(keys);
+}
+function currentUserAlertKeys(){
+  const keys = new Set();
+  const linked = typeof resolveCurrentLinkedMember === 'function' ? (resolveCurrentLinkedMember() || {}) : {};
+  const authUsers = Array.isArray(state.authUsers) ? state.authUsers : [];
+  const profile = authUsers.find(user => String(user.uid || '') === String(currentAccessUid() || '')) || {};
+  [
+    normalizeAlertTag(currentAccessPlayerTag()),
+    normalizeAlertTag(linked.playerTag || linked.tag || ''),
+    normalizeAlertTag(profile.playerTag || ''),
+    normalizeAlertName(currentAccessLinkedMemberName()),
+    normalizeAlertName(linked.name || linked.nick || ''),
+    normalizeAlertName(window.TOPBRS_ACCESS?.nick || ''),
+    normalizeAlertName(profile.nick || profile.name || ''),
+    normalizeAlertName(currentAccessEmail())
+  ].filter(Boolean).forEach(k => keys.add(k));
+  return Array.from(keys);
+}
+function getCurrentUserAlerts(){
+  const keys = currentUserAlertKeys();
+  const userKey = getRealtimeUserKey();
+  const alerts = Array.isArray(__topbrsRemoteNotifications) && __topbrsRemoteNotifications.length ? __topbrsRemoteNotifications : getMemberAlertsStore();
+  return alerts.filter(item => {
+      const recipients = Array.isArray(item.recipientKeys) ? item.recipientKeys : [];
+      const deleted = Array.isArray(item.deletedBy) ? item.deletedBy : [];
+      return recipients.some(k => keys.includes(k)) && !deleted.includes(userKey);
+    })
+    .sort((a,b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0,5);
+}
+function isAlertSeen(item={}){
+  const userKey = getRealtimeUserKey();
+  const seenBy = Array.isArray(item.seenBy) ? item.seenBy : [];
+  return Boolean(item.seen) || seenBy.includes(userKey);
+}
+function updateNotificationBadge(){
+  if(!ui.drawerNotificationBtn || !ui.drawerNotificationBadge) return;
+  const unread = getCurrentUserAlerts().filter(item => !isAlertSeen(item)).length;
+  ui.drawerNotificationBadge.textContent = unread > 9 ? '9+' : String(unread);
+  ui.drawerNotificationBadge.classList.toggle('hidden', unread === 0);
+  ui.drawerNotificationBtn.classList.toggle('has-alert', unread > 0);
+}
+
+
+function getLeadershipTargetOptions(selectedKey=''){
+  return activeMembers().map(member => {
+    const value = normalizeAlertTag(member.playerTag || member.tag || '') || normalizeAlertName(member.name || member.nick || '');
+    const isSelected = String(value) === String(selectedKey || '');
+    return `<option value="${esc(value)}" ${isSelected ? 'selected' : ''}>${esc(member.name || 'Membro')}</option>`;
+  }).join('');
+}
+function resolveLeadershipTargetMember(memberKey=''){
+  const normalized = String(memberKey || '');
+  return activeMembers().find(member => {
+    const tagKey = normalizeAlertTag(member.playerTag || member.tag || '');
+    const nameKey = normalizeAlertName(member.name || member.nick || '');
+    return normalized === tagKey || normalized === nameKey;
+  }) || null;
+}
+function refreshLeadershipNoticeComposer(){
+  const scope = String(document.getElementById('leadershipNoticeScope')?.value || 'global');
+  const targetField = document.getElementById('leadershipTargetField');
+  if(targetField) targetField.style.display = scope === 'member' ? 'block' : 'none';
+}
+function openAlertComposer(member={}, options={}){
+  if(!ui.alertComposerModal || !ui.alertComposerBody || !ui.alertComposerTitle) return;
+  const defaultScope = String(options.defaultScope || 'member');
+  const selectedKey = normalizeAlertTag(member.playerTag || member.tag || '') || normalizeAlertName(member.name || member.nick || '');
+  ui.alertComposerTitle.textContent = options.leadershipMode ? 'Aviso da liderança' : `Notificar ${member.name || 'membro'}`;
+  ui.alertComposerModal.dataset.member = JSON.stringify({ name: member.name || '', playerTag: member.playerTag || member.tag || '' });
+  ui.alertComposerModal.dataset.scope = defaultScope;
+  ui.alertComposerBody.innerHTML = `
+    ${options.leadershipMode ? '' : `
+    <div class="alert-template-list">
+      ${Object.values(SMART_ALERT_TEMPLATES).map(item => `
+        <button type="button" class="alert-template-btn ${item.tone}" data-alert-template="${esc(item.key)}">
+          <strong>${esc(item.label)}</strong>
+          <span>${esc(item.message)}</span>
+        </button>
+      `).join('')}
+    </div>
+    <div class="hub-divider"></div>`}
+    <label class="field">
+      <span>Destino</span>
+      <select id="leadershipNoticeScope" data-leadership-scope>
+        <option value="member" ${defaultScope === 'member' ? 'selected' : ''}>Membro</option>
+        <option value="global" ${defaultScope === 'global' ? 'selected' : ''}>Global</option>
+      </select>
+    </label>
+    <label class="field" id="leadershipTargetField" style="display:${defaultScope === 'member' ? 'block' : 'none'}">
+      <span>Selecionar membro</span>
+      <select id="leadershipTargetMember">${getLeadershipTargetOptions(selectedKey)}</select>
+    </label>
+    <label class="field">
+      <span>Mensagem personalizada</span>
+      <textarea id="leadershipNoticeInput" rows="4" placeholder="Digite o aviso da liderança"></textarea>
+    </label>
+    <button type="button" class="primary" id="sendLeadershipNoticeBtn">Enviar aviso</button>
+  `;
+  ui.alertComposerModal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  refreshLeadershipNoticeComposer();
+}
+
+function closeAlertComposer(){
+  if(!ui.alertComposerModal) return;
+  ui.alertComposerModal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+
+async function sendLeadershipNotice(member={}, customMessage='', scope='member', selectedMemberKey=''){
+  const message = String(customMessage || '').trim();
+  if(!message) { showToast('Digite uma mensagem para o aviso.', 'error'); return false; }
+  try{
+    await ensureRealtimeMessaging();
+    const firebase = window.TOPBRS_FIREBASE;
+    const api = window.__topbrsNotifApi;
+    if(!firebase?.db || !api?.addDoc) throw new Error('Firestore indisponível');
+    let recipientKeys = [];
+    let memberName = member.name || 'Clã';
+    let memberTag = normalizeAlertTag(member.playerTag || member.tag || '');
+    if(scope === 'global'){
+      const setKeys = new Set();
+      activeMembers().forEach(m => buildAlertRecipientKeys(m).forEach(k => setKeys.add(k)));
+      recipientKeys = Array.from(setKeys);
+      memberName = 'Clã TopBRS';
+      memberTag = '';
+    }else{
+      const target = resolveLeadershipTargetMember(selectedMemberKey) || member;
+      recipientKeys = buildAlertRecipientKeys(target);
+      memberName = target?.name || member.name || 'Membro';
+      memberTag = normalizeAlertTag(target?.playerTag || target?.tag || '');
+    }
+    if(!recipientKeys.length) throw new Error('Sem destinatário');
+    await api.addDoc(api.collection(firebase.db, 'topbrs_notifications'), {
+      recipientKeys,
+      memberName,
+      playerTag: memberTag,
+      title: '📢 Aviso da liderança',
+      message,
+      tone: 'blue',
+      createdAt: api.serverTimestamp(),
+      seenBy: [],
+      deletedBy: [],
+      sentBy: currentAccessRole()
+    });
+    showToast(scope === 'global' ? 'Aviso global enviado.' : 'Aviso enviado.');
+    return true;
+  }catch(err){
+    console.warn('sendLeadershipNotice', err);
+    showToast('Falha ao enviar aviso.', 'error');
+    return false;
+  }
+}
+
+function getAutoAlertRecommendation(item){
+  if(item.totalWeek === 16) return 'excellent';
+  if(item.totalWeek >= 12) return 'good';
+  if(item.totalWeek >= 8) return 'observation';
+  return 'charge';
+}
+function alreadySentAutoRecently(member={}, type='observation'){
+  const memberName = String(member.name || '').trim().toLowerCase();
+  return (__topbrsRemoteNotifications || []).some(n =>
+    String(n.memberName || '').trim().toLowerCase() === memberName &&
+    String(n.tone || '').toLowerCase() === String((SMART_ALERT_TEMPLATES[type]?.tone || '')).toLowerCase() &&
+    (Date.now() - new Date(n.createdAt || 0).getTime()) < 12*60*60*1000
+  );
+}
+async function runAutomaticAlerts(weeklyRows=[]){
+  if(!Array.isArray(weeklyRows) || !weeklyRows.length) return;
+  const autoKey = `${getHubSelectedMonth()}_${getHubSelectedWeek()}`;
+  state.ui ||= {};
+  if(state.ui.lastAutoAlertRunKey === autoKey) return;
+  for(const item of weeklyRows){
+    const type = getAutoAlertRecommendation(item);
+    if(type === 'good' && item.decision !== 'Bom desempenho' && item.totalWeek < 16) continue;
+    if(type === 'observation' && item.riskTone === 'safe') continue;
+    if(alreadySentAutoRecently(item.member, type)) continue;
+    await sendSmartAlert(item.member, type);
+  }
+  state.ui.lastAutoAlertRunKey = autoKey;
+  saveState();
+}
+async function ensureRealtimeMessaging(){
+  try{
+    const firebase = window.TOPBRS_FIREBASE;
+    if(!firebase?.app || !firebase?.db){
+      setTimeout(() => ensureRealtimeMessaging(), 1200);
+      return;
+    }
+    const db = firebase.db;
+    const { collection, onSnapshot, query, orderBy, limit, addDoc, updateDoc, doc, serverTimestamp, arrayUnion, setDoc } = await import('https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js');
+    window.__topbrsNotifApi = { collection, onSnapshot, query, orderBy, limit, addDoc, updateDoc, doc, serverTimestamp, arrayUnion, setDoc };
+
+    if(!__topbrsNotifUnsub){
+      const notifQuery = query(collection(db, 'topbrs_notifications'), orderBy('createdAt', 'desc'), limit(100));
+      __topbrsNotifUnsub = onSnapshot(notifQuery, snapshot => {
+        const prevIds = new Set(__topbrsRemoteNotifications.map(item => String(item.id || '')));
+        __topbrsRemoteNotifications = snapshot.docs.map(entry => {
+          const data = entry.data() || {};
+          return {
+            id: entry.id,
+            recipientKeys: Array.isArray(data.recipientKeys) ? data.recipientKeys : [],
+            memberName: data.memberName || '',
+            playerTag: normalizeAlertTag(data.playerTag || ''),
+            title: data.title || 'Alerta',
+            message: data.message || '',
+            tone: data.tone || 'blue',
+            createdAt: data.createdAt?.toDate?.()?.toISOString?.() || data.createdAt || new Date().toISOString(),
+            seenBy: Array.isArray(data.seenBy) ? data.seenBy : [],
+            deletedBy: Array.isArray(data.deletedBy) ? data.deletedBy : []
+          };
+        });
+        const mine = getCurrentUserAlerts();
+        if(__topbrsNotificationsReady){
+          const unseenNew = mine.find(item => !prevIds.has(String(item.id || '')) && !isAlertSeen(item));
+          if(unseenNew){
+            const key = String(unseenNew.id || '');
+            if(document.visibilityState === 'visible'){
+              showToast('Consulte seus alertas 🔔');
+              state.ui.seenRealtimeNotificationIds ||= {};
+              state.ui.seenRealtimeNotificationIds[key] = true;
+            }else if(!state.ui.seenRealtimeNotificationIds?.[key]){
+              openMemberAlertFromItem(unseenNew);
+            }
+          }
+        }
+        __topbrsNotificationsReady = true;
+        updateNotificationBadge();
+        renderNotificationCenter();
+        maybeShowPendingMemberAlert();
+      });
+    }
+
+    if(!__topbrsPresenceUnsub){
+      const presCol = collection(db, 'topbrs_presence');
+      __topbrsPresenceUnsub = onSnapshot(presCol, snapshot => {
+        const next = {};
+        snapshot.forEach(entry => {
+          const data = entry.data() || {};
+          next[entry.id] = {
+            online: Boolean(data.online),
+            memberKeys: Array.isArray(data.memberKeys) ? data.memberKeys : [],
+            lastSeenAt: data.lastSeenAt?.toDate?.()?.getTime?.() || Date.now()
+          };
+        });
+        __topbrsRemotePresence = next;
+        __topbrsPresenceReady = true;
+        if(document.querySelector('.view.active')?.id === 'membersView'){
+          try{ renderMembers(monthContext(canonicalMonthKey(state.meta.currentMonth))); }catch(e){}
+        }
+      });
+    }
+    await syncCurrentPresence('online');
+  }catch(err){
+    console.warn('ensureRealtimeMessaging', err);
+  }
+}
+async function syncCurrentPresence(mode='online'){
+  try{
+    const firebase = window.TOPBRS_FIREBASE;
+    const api = window.__topbrsNotifApi;
+    if(!firebase?.db || !api?.setDoc || !api?.doc) return;
+    const member = typeof resolveCurrentLinkedMember === 'function' ? (resolveCurrentLinkedMember() || {}) : {};
+    const memberKeys = Array.from(new Set([
+      normalizeAlertTag(currentAccessPlayerTag()),
+      normalizeAlertTag(member.playerTag || member.tag || ''),
+      normalizeAlertName(currentAccessLinkedMemberName()),
+      normalizeAlertName(member.name || member.nick || ''),
+      normalizeAlertName(currentAccessNick())
+    ].filter(Boolean)));
+    const presenceId = getRealtimeUserKey().replace(/[.#$/\[\]]/g,'_');
+    await api.setDoc(api.doc(firebase.db, 'topbrs_presence', presenceId), {
+      online: mode === 'online',
+      memberKeys,
+      lastSeenAt: api.serverTimestamp()
+    }, { merge:true });
+  }catch(err){
+    console.warn('syncCurrentPresence', err);
+  }
+}
+function startPresenceHeartbeat(){
+  clearInterval(__topbrsPresenceHeartbeat);
+  syncCurrentPresence(document.visibilityState === 'visible' ? 'online' : 'offline');
+  __topbrsPresenceHeartbeat = setInterval(() => {
+    syncCurrentPresence(document.visibilityState === 'visible' ? 'online' : 'offline');
+  }, 45000);
+}
+async function sendSmartAlert(member={}, templateKey='observation'){
+  const template = SMART_ALERT_TEMPLATES[templateKey];
+  if(!template) return false;
+  const recipientKeys = buildAlertRecipientKeys(member);
+  if(!recipientKeys.length) return false;
+  try{
+    await ensureRealtimeMessaging();
+    const firebase = window.TOPBRS_FIREBASE;
+    const api = window.__topbrsNotifApi;
+    if(!firebase?.db || !api?.addDoc) throw new Error('Firestore indisponível');
+    await api.addDoc(api.collection(firebase.db, 'topbrs_notifications'), {
+      recipientKeys,
+      memberName: member.name || '',
+      playerTag: normalizeAlertTag(member.playerTag || member.tag || ''),
+      title: template.title,
+      message: template.message,
+      tone: template.tone,
+      createdAt: api.serverTimestamp(),
+      seenBy: [],
+      deletedBy: [],
+      sentBy: currentAccessRole()
+    });
+    showToast('Alerta enviado com sucesso.');
+    return true;
+  }catch(err){
+    console.warn('sendSmartAlert', err);
+    showToast('Falha ao enviar alerta.', 'error');
+    return false;
+  }
+}
+function renderNotificationCenter(){
+  if(!ui.notificationCenterList || !ui.notificationCenterMeta) return;
+  const alerts = getCurrentUserAlerts();
+  if(!alerts.length){
+    ui.notificationCenterMeta.textContent = 'Sem alertas recentes';
+    ui.notificationCenterList.innerHTML = '<div class="empty">Sem alertas recentes</div>';
+    updateNotificationBadge();
+    return;
+  }
+  const unread = alerts.filter(item => !isAlertSeen(item)).length;
+  ui.notificationCenterMeta.textContent = `${unread} nova(s) • limite de 5 mensagens`;
+  ui.notificationCenterList.innerHTML = alerts.map(item => `
+    <article class="notif-row glass ${isAlertSeen(item) ? 'seen' : 'unseen'}">
+      <button type="button" class="notif-open" data-open-alert-id="${esc(String(item.id || ''))}">
+        <strong>${esc(item.title || 'Alerta')}</strong>
+        <span>${esc((item.message || '').slice(0,90))}${String(item.message || '').length > 90 ? '…' : ''}</span>
+        <small>${esc(new Date(item.createdAt || Date.now()).toLocaleString('pt-BR'))}</small>
+      </button>
+      <button type="button" class="notif-delete" data-delete-alert-id="${esc(String(item.id || ''))}" title="Excluir">🗑️</button>
+    </article>
+  `).join('');
+  updateNotificationBadge();
+}
+function openNotificationCenter(){
+  if(!ui.notificationCenterModal) return;
+  if(typeof closeDrawer === 'function') closeDrawer();
+  renderNotificationCenter();
+  ui.notificationCenterModal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+function closeNotificationCenter(){
+  if(!ui.notificationCenterModal) return;
+  ui.notificationCenterModal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+function openMemberAlertFromItem(item){
+  if(!ui.memberAlertModal || !item) return;
+  if(typeof closeDrawer === 'function') closeDrawer();
+  ui.memberAlertModal.dataset.alertId = String(item.id || '');
+  ui.memberAlertTitle.textContent = item.title || 'Notificação';
+  ui.memberAlertMessage.textContent = item.message || 'Você recebeu uma mensagem da liderança.';
+  ui.memberAlertMeta.textContent = `${item.memberName || 'Membro'} • Liderança TopBRS`;
+  ui.memberAlertModal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+async function closeMemberAlert(markSeen=true){
+  if(!ui.memberAlertModal) return;
+  const alertId = String(ui.memberAlertModal.dataset.alertId || '');
+  if(markSeen && alertId){
+    try{
+      const api = window.__topbrsNotifApi;
+      const firebase = window.TOPBRS_FIREBASE;
+      if(api?.updateDoc && firebase?.db){
+        await api.updateDoc(api.doc(firebase.db, 'topbrs_notifications', alertId), {
+          seenBy: api.arrayUnion(getRealtimeUserKey())
+        });
+      }
+    }catch(err){ console.warn('closeMemberAlert', err); }
+  }
+  ui.memberAlertModal.classList.add('hidden');
+  ui.memberAlertModal.dataset.alertId = '';
+  document.body.style.overflow = '';
+  updateNotificationBadge();
+  renderNotificationCenter();
+}
+async function deleteAlertById(id=''){
+  try{
+    const api = window.__topbrsNotifApi;
+    const firebase = window.TOPBRS_FIREBASE;
+    if(api?.updateDoc && firebase?.db){
+      await api.updateDoc(api.doc(firebase.db, 'topbrs_notifications', String(id || '')), {
+        deletedBy: api.arrayUnion(getRealtimeUserKey())
+      });
+    }
+  }catch(err){ console.warn('deleteAlertById', err); }
+}
+function maybeShowPendingMemberAlert(){
+  const pending = getCurrentUserAlerts().find(item => !isAlertSeen(item));
+  if(!pending) return;
+  if(!ui.memberAlertModal || !ui.memberAlertModal.classList.contains('hidden')) return;
+  openMemberAlertFromItem(pending);
+}
+function getPresenceToneForMember(member={}){
+  const keys = buildAlertRecipientKeys(member);
+  const now = Date.now();
+  let latest = null;
+  Object.values(__topbrsRemotePresence || {}).forEach(item => {
+    if(Array.isArray(item.memberKeys) && item.memberKeys.some(k => keys.includes(k))){
+      if(!latest || item.lastSeenAt > latest.lastSeenAt) latest = item;
+    }
+  });
+  if(!latest) return 'offline';
+  if(latest.online && now - Number(latest.lastSeenAt || 0) < 120000) return 'online';
+  if(now - Number(latest.lastSeenAt || 0) < 300000) return 'away';
+  return 'offline';
+}
+
+
+function renderHubDecisionView(){
+  if(!ui.hubDecisionBoard) return;
+  const {weeklyRows, month, week} = buildHubContext();
+  const activeFilter = getHubUiFilter('hubDecisionFilter', 'all');
+  if(ui.hubDecisionMeta){
+    const promote = weeklyRows.filter(item => /promoção/i.test(item.decision)).length;
+    const cobrar = weeklyRows.filter(item => /cobrar/i.test(item.decision)).length;
+    const observar = weeklyRows.filter(item => /observar/i.test(item.decision)).length;
+    const manter = weeklyRows.filter(item => /bom desempenho|manter/i.test(item.decision) || item.decision === 'Bom desempenho').length;
+    ui.hubDecisionMeta.innerHTML = [
+      renderHubMiniStats([
+        { label:'Promoção', value:promote, tone:'good' },
+        { label:'Cobrar', value:cobrar, tone:'bad' },
+        { label:'Observar', value:observar, tone:'warn' },
+        { label:'Manter', value:manter, tone:'blue' }
+      ]),
+      renderHubMetaBlock(`${monthLabel(month)} • S${week} • recomendações para liderança.`),
+      renderHubFilterBar('decision', [
+        { value:'all', label:'Todos' },
+        { value:'promotion', label:'Promoção' },
+        { value:'charge', label:'Cobrar' },
+        { value:'observe', label:'Observar' },
+        { value:'maintain', label:'Manter' }
+      ], activeFilter)
+    ].join('');
+  }
+  const filteredRows = weeklyRows.filter(item => {
+    if(activeFilter === 'all') return true;
+    if(activeFilter === 'promotion') return /promoção/i.test(item.decision);
+    if(activeFilter === 'charge') return /cobrar/i.test(item.decision);
+    if(activeFilter === 'observe') return /observar/i.test(item.decision);
+    if(activeFilter === 'maintain') return /bom desempenho|manter/i.test(item.decision) || item.decision === 'Bom desempenho';
+    return true;
+  });
+  ui.hubDecisionBoard.innerHTML = filteredRows.map(item => {
+    const memberName = String(item?.member?.name || item?.member?.nick || item?.summary?.name || 'Sem nome');
+    const expanded = getHubRowExpansion('decision', memberName);
+    return `
+      <article class="hub-compact-row glass">
+        <div class="hub-compact-head hub-decision-head">
+          <div class="hub-decision-name" title="${esc(memberName)}">${esc(memberName)}</div>
+          <div class="hub-row-actions">
+            <button type="button" class="hub-bell-btn" data-open-alert-composer='${esc(JSON.stringify({name:memberName, playerTag:item.member.playerTag || item.member.tag || ''}))}' title="Enviar alerta">🔔</button>
+            <button type="button" class="hub-toggle-btn" data-hub-toggle-row="decision|${encodeURIComponent(memberName)}" aria-label="${expanded ? 'Recolher' : 'Expandir'}">${expanded ? '▴' : '▾'}</button>
+          </div>
+        </div>
+        ${expanded ? `
+          <div class="hub-compact-body">
+            <div class="hub-compact-banner ${/promoção/i.test(item.decision) ? 'good' : /expulsão|cobrar/i.test(item.decision) ? 'bad' : 'blue'}">${esc(item.decision)}</div>
+            <div class="hub-compact-chips">
+              <span class="chip">${item.totalWeek}/16 semana</span>
+              <span class="chip">${item.summary.scoreElite} elite</span>
+              <span class="chip blue">${esc(item.summary.suggestion)}</span>
+              <span class="chip ${/Queda/.test(item.historyRisk) ? 'bad' : /Evoluindo/.test(item.historyRisk) ? 'good' : 'blue'}">${esc(item.historyRisk)}</span>
+            </div>
+          </div>` : ''}
+      </article>
+    `;
+  }).join('') || '<div class="empty">Nenhum membro nesse filtro.</div>';
+}
+function renderHubClanView(){
+
+  if(!ui.hubClanSummary || !ui.hubClanBoard) return;
+  renderHubMonthWeekControls();
+  const {ctx, month, week, weeklyRows} = buildHubContext();
+  const activeFilter = getHubUiFilter('hubClanFilter', 'all');
+  const weeklySorted = [...weeklyRows].sort((a,b) => b.totalWeek - a.totalWeek || a.member.name.localeCompare(b.member.name,'pt-BR'));
+  const top = weeklySorted[0];
+  const low = [...weeklySorted].filter(r => r.totalWeek >= 0).sort((a,b) => a.totalWeek - b.totalWeek || a.member.name.localeCompare(b.member.name,'pt-BR'))[0];
+  const monthGoal = state.goals?.[month]?.attacks || 1200;
+  const weekTotal = weeklyRows.reduce((acc, item) => acc + item.totalWeek, 0);
+  const weekGoal = activeMembers().length * 16;
+  ui.hubClanSummary.innerHTML = `
+    ${renderHubMetaBlock(`${monthLabel(month)} • S${week} • visão do mês + acompanhamento semanal.`)}
+    <div class="hub-grid">
+      <article class="hub-card glass"><small>Ataques do mês</small><strong>${ctx.attackTotalClan}</strong><span>Meta ${monthGoal}</span></article>
+      <article class="hub-card glass"><small>Ataques da semana</small><strong>${weekTotal}</strong><span>Meta ${weekGoal}</span></article>
+      <article class="hub-card glass"><small>Mais ataca</small><strong>${esc(top?.member?.name || '—')}</strong><span>${top ? top.totalWeek + ' na semana' : 'Sem dados'}</span></article>
+      <article class="hub-card glass"><small>Menos ataca</small><strong>${esc(low?.member?.name || '—')}</strong><span>${low ? low.totalWeek + ' na semana' : 'Sem dados'}</span></article>
+    </div>
+    ${renderHubFilterBar('clan', [
+      { value:'all', label:'Todos' },
+      { value:'top', label:'Mais ativos' },
+      { value:'low', label:'Menos ativos' }
+    ], activeFilter)}
+  `;
+  let filtered = weeklySorted;
+  if(activeFilter === 'top') filtered = weeklySorted.slice(0, 10);
+  if(activeFilter === 'low') filtered = [...weeklySorted].reverse().slice(0, 10);
+  ui.hubClanBoard.innerHTML = filtered.map((item, idx) => {
+    const expanded = getHubRowExpansion('clan', item.member.name);
+    return `
+      <article class="hub-compact-row glass">
+        <div class="hub-compact-head">
+          <strong>#${idx+1} ${esc(item.member.name)}</strong>
+          <button type="button" class="hub-toggle-btn" data-hub-toggle-row="clan|${encodeURIComponent(item.member.name)}" aria-label="${expanded ? 'Recolher' : 'Expandir'}">${expanded ? '▴' : '▾'}</button>
+        </div>
+        ${expanded ? `
+          <div class="hub-compact-body">
+            <div class="hub-compact-banner blue">${item.totalWeek} ataques na semana</div>
+            <div class="hub-compact-chips">
+              <span class="chip">${item.summary.attacksMonth} atk mês</span>
+              <span class="chip">${item.summary.tournamentPoints} pts torneio</span>
+              <span class="chip blue">${item.summary.clinchitPoints} clinchit</span>
+              <span class="chip ${/Queda/.test(item.historyRisk) ? 'bad' : /Evoluindo/.test(item.historyRisk) ? 'good' : 'blue'}">${esc(item.historyRisk)}</span>
+            </div>
+          </div>` : ''}
+      </article>
+    `;
+  }).join('') || '<div class="empty">Nenhum dado para exibir.</div>';
+}
+
+function monthContext(month){
+  month = canonicalMonthKey(month);
+  const monthObj = ensureMonth(month);
+  const members = activeMembers();
+  const summaries = [];
+  let maxWeeksStarted = 0;
+
+  for(const member of members){
+    const weekly = [1,2,3,4].map(week => recomputeWeekRecord(structuredClone(ensureWeekMember(month, week, member.name))));
+    const tournament = ensureTournamentMember(month, member.name);
+    tournament.weeks = tournament.weeks.map((item, idx) => {
+      let position = item.position === '' ? null : item.position;
+      if(position != null) position = Number(position);
+      const participated = !!item.participated || !!position;
+      return {participated, position, points: computeTournamentPoints(position, participated)};
+    });
+    tournament.pointsMonth = round1(tournament.weeks.reduce((acc, item) => acc + item.points, 0));
+    tournament.top3Month = tournament.weeks.filter(item => item.position && item.position <= 3).length;
+
+    const attacksByWeek = weekly.map(w => w.attacksTotal);
+    const attacksMonth = attacksByWeek.reduce((a,b)=>a+b,0);
+    const days44Month = weekly.reduce((acc,w)=>acc + w.days44,0);
+    const perfectWeeks = weekly.filter(w => w.clinchit).length;
+    const tournamentParticipationPoints = round1(tournament.weeks.reduce((acc, item) => acc + (item.participated ? Number(state.meta.tournamentRules.participation || 0) : 0), 0));
+    const tournamentPlacementPoints = round1(tournament.weeks.reduce((acc, item) => {
+      if(item.position === 1) return acc + Number(state.meta.tournamentRules.first || 0);
+      if(item.position === 2) return acc + Number(state.meta.tournamentRules.second || 0);
+      if(item.position === 3) return acc + Number(state.meta.tournamentRules.third || 0);
+      return acc;
+    }, 0));
+    const tournamentPoints = round1(tournamentParticipationPoints + tournamentPlacementPoints);
+    const clinchitPoints = perfectWeeks * 3;
+    const classificationPoints = attacksMonth + tournamentPoints + clinchitPoints;
+    const scoreIntegrated = attacksMonth + tournamentPoints;
+    const weeksStarted = [1,2,3,4].filter((week, idx) => {
+      return attacksByWeek[idx] > 0 || tournament.weeks[idx].participated || tournament.weeks[idx].position;
+    }).length;
+    maxWeeksStarted = Math.max(maxWeeksStarted, weeksStarted);
+    const expectedAttacks = weeksStarted * 16;
+    const baseWarBonus = perfectWeeks * 3 + (days44Month >= 12 ? 5 : days44Month >= 8 ? 3 : days44Month >= 4 ? 1 : 0);
+    const penalty = weeksStarted >= 2 && attacksMonth === 0 && tournamentPoints === 0 ? 6 : (weeksStarted >= 1 && attacksMonth < Math.max(1, weeksStarted*8) ? 2 : 0);
+    const scorePro = round1(attacksMonth * 0.6 + tournamentPoints * 0.4 + baseWarBonus - penalty);
+    const scoreElite = round2(scorePro + (member.eligibleTournament ? 0.2 : 0) + tournament.top3Month*0.2 + days44Month*0.05);
+    let confidence = 'BAIXA';
+    if(weeksStarted === 0) confidence = 'NÃO INICIADO';
+    else if(perfectWeeks === weeksStarted && tournamentPoints > 0) confidence = 'ALTA';
+    else if(attacksMonth >= expectedAttacks || tournamentPoints > 0 || perfectWeeks > 0) confidence = 'MÉDIA';
+    let activityStatus = (attacksMonth === 0 && tournamentPoints === 0) ? 'INATIVO' : 'ATIVO';
+    let warPriority = 'BAIXA';
+    if(weeksStarted === 0) warPriority = 'NÃO INICIADO';
+    else if(attacksMonth < Math.max(1, weeksStarted*8)) warPriority = 'CRÍTICA';
+    else if(attacksMonth < expectedAttacks) warPriority = 'ALTA';
+    else if(tournamentPoints === 0) warPriority = 'MÉDIA';
+    let alert = 'ESTÁVEL';
+    if(weeksStarted === 0) alert = 'NÃO INICIADO';
+    else if(activityStatus === 'INATIVO' && weeksStarted >= 2) alert = 'EXPULSÃO';
+    else if(attacksMonth < Math.max(1, weeksStarted*8) && tournamentPoints === 0) alert = 'RISCO';
+    else if(attacksMonth < expectedAttacks || tournamentPoints === 0) alert = 'OBSERVAÇÃO';
+    let suggestion = suggestionFor(member, {scoreElite, scorePro, confidence, attacksMonth, weeksStarted, tournamentPoints, activityStatus});
+    let progressStatus = weeksStarted === 0 ? 'AGUARDANDO INÍCIO' : attacksMonth >= expectedAttacks ? 'NO RITMO' : 'ABAIXO DO RITMO';
+
+    summaries.push({
+      member, weekly, tournament, attacksByWeek, attacksMonth, days44Month, perfectWeeks,
+      tournamentPoints, tournamentParticipationPoints, tournamentPlacementPoints, clinchitPoints, classificationPoints,
+      scoreIntegrated, scorePro, scoreElite, confidence, warPriority,
+      alert, suggestion, activityStatus, expectedAttacks, weeksStarted, progressStatus,
+      baseWarBonus, penalty
+    });
+  }
+
+  summaries.sort((a,b) => (b.scoreElite - a.scoreElite) || (b.scoreIntegrated - a.scoreIntegrated) || (b.attacksMonth - a.attacksMonth) || roleWeight(b.member.role)-roleWeight(a.member.role) || a.member.name.localeCompare(b.member.name));
+  summaries.forEach((item, index) => item.rankElite = index + 1);
+
+  const attackTotalClan = summaries.reduce((acc,s) => acc + s.attacksMonth, 0);
+  const tournamentTotalClan = round1(summaries.reduce((acc,s)=>acc + s.tournamentPoints, 0));
+  const avgElite = summaries.length ? round1(summaries.reduce((acc,s)=>acc + s.scoreElite, 0) / summaries.length) : 0;
+  const riskCount = summaries.filter(s => ['RISCO','EXPULSÃO'].includes(s.alert)).length;
+  const reviewCount = summaries.filter(s => s.suggestion === 'REVISAR CARGO').length;
+  const promoteCount = summaries.filter(s => s.suggestion === 'PROMOVER').length;
+  const expelCount = summaries.filter(s => s.suggestion === 'EXPULSAR').length;
+
+  return {summaries, attackTotalClan, tournamentTotalClan, avgElite, riskCount, reviewCount, promoteCount, expelCount, maxWeeksStarted};
+}
+function suggestionFor(member, stats){
+  const role = member.role || 'Membro';
+  if(/líder/i.test(role)) return 'MANTER';
+  if(stats.activityStatus === 'INATIVO' && stats.weeksStarted >= 2) return 'EXPULSAR';
+  if(/co-líder/i.test(role)){
+    return stats.scoreElite < 11 || stats.confidence === 'BAIXA' ? 'REVISAR CARGO' : 'MANTER';
+  }
+  if(/ancião/i.test(role)){
+    if(stats.scoreElite >= 11.5 && stats.confidence !== 'BAIXA') return 'PROMOVER';
+    if(stats.scoreElite < 5 && stats.weeksStarted >= 2) return 'OBSERVAR';
+    return 'MANTER';
+  }
+  if(stats.scoreElite >= 10 && stats.confidence !== 'BAIXA') return 'PROMOVER';
+  if(stats.scoreElite < 4 && stats.weeksStarted >= 2) return 'EXPULSAR';
+  return 'OBSERVAR';
+}
+function round1(n){ return Math.round((Number(n)||0) * 10) / 10; }
+function round2(n){ return Math.round((Number(n)||0) * 100) / 100; }
+function pct(current,total){
+  if(!total) return 0;
+  return Math.max(0, Math.min(100, Math.round((current/total)*100)));
+}
+
+function formatSyncDate(dateValue){
+  const d = dateValue instanceof Date ? dateValue : new Date(dateValue || Date.now());
+  if(Number.isNaN(d.getTime())) return '--';
+  return d.toLocaleString('pt-BR', {
+    day:'2-digit', month:'2-digit', year:'2-digit',
+    hour:'2-digit', minute:'2-digit'
+  });
+}
+function updateSyncStatusDisplay(status='online', timestamp=null){
+  const indicator = document.getElementById('syncIndicator');
+  const text = document.getElementById('syncText');
+  const time = document.getElementById('syncTime');
+  if(indicator){
+    indicator.classList.remove('online','syncing','manual');
+    indicator.classList.add(status === 'syncing' ? 'syncing' : status === 'manual' ? 'manual' : 'online');
+  }
+  if(text){
+    text.textContent = status === 'syncing'
+      ? 'Sincronizando...'
+      : status === 'manual'
+        ? 'Atualizado agora'
+        : 'Tempo real ativo';
+  }
+  if(time){
+    const stamp = timestamp || state?.ui?.lastSyncAt || Date.now();
+    time.textContent = `Última atualização: ${formatSyncDate(stamp)}`;
+  }
+}
+function markSyncTimestamp(ts = Date.now(), mode='online'){
+  state.ui ||= {};
+  state.ui.lastSyncAt = new Date(ts).toISOString();
+  try{ saveState(); }catch(e){}
+  updateSyncStatusDisplay(mode, state.ui.lastSyncAt);
+}
+async function manualRefreshSync(){
+  const btn = document.getElementById('syncRefreshBtn');
+  if(btn) btn.classList.add('spinning');
+  updateSyncStatusDisplay('syncing');
+  try{
+    if(window.TOPBRS_AUTH_UI?.refreshUsersNow){
+      await window.TOPBRS_AUTH_UI.refreshUsersNow();
+    }
+    if(window.TOPBRS_FIREBASE_SYNC?.refreshNow){
+      await window.TOPBRS_FIREBASE_SYNC.refreshNow();
+    }
+    markSyncTimestamp(Date.now(), 'manual');
+    render();
+    setTimeout(()=>updateSyncStatusDisplay('online'), 1800);
+  }catch(e){
+    updateSyncStatusDisplay('online');
+  }finally{
+    if(btn) btn.classList.remove('spinning');
+  }
+}
+
+
+function applyDynamicTopSpacing(){
+  const topbar = document.querySelector('.topbar');
+  if(!topbar) return;
+  const h = Math.max(72, Math.round(topbar.getBoundingClientRect().height || topbar.offsetHeight || 0));
+  const heroPad = Math.max(28, Math.min(42, Math.round(h * 0.36)));
+  const heroCopy = Math.max(10, Math.min(18, Math.round(h * 0.14)));
+  const heroControls = Math.max(4, Math.min(10, Math.round(h * 0.08)));
+  const firstGap = Math.max(8, Math.min(14, Math.round(h * 0.12)));
+  document.documentElement.style.setProperty('--topbar-height-dyn', `${h}px`);
+  document.documentElement.style.setProperty('--hero-top-pad-dyn', `${heroPad}px`);
+  document.documentElement.style.setProperty('--hero-copy-offset-dyn', `${heroCopy}px`);
+  document.documentElement.style.setProperty('--hero-controls-offset-dyn', `${heroControls}px`);
+  document.documentElement.style.setProperty('--first-block-gap-dyn', `${firstGap}px`);
+}
+window.addEventListener('resize', applyDynamicTopSpacing);
+window.addEventListener('orientationchange', () => setTimeout(applyDynamicTopSpacing, 80));
+
+
+
+const WAR_DAY_SWITCH_HOUR = 6 + (41/60);
+
+function getWarReferenceDate(now = new Date()){
+  const ref = new Date(now);
+  const hour = ref.getHours() + (ref.getMinutes()/60);
+  const dow = ref.getDay(); // 0=Dom ... 6=Sáb
+
+  // A janela da guerra só vira por volta de 06:41 do dia seguinte.
+  // Antes disso, seguimos considerando o dia/bloco anterior.
+  if((dow === 5 || dow === 6 || dow === 0 || dow === 1) && hour < WAR_DAY_SWITCH_HOUR){
+    ref.setDate(ref.getDate() - 1);
+  }
+  return ref;
+}
+
+
+function getWarAutoSelection(){
+  const month = canonicalMonthKey(state.ui?.warAutoMonth || state.meta.currentMonth);
+  const week = Number(state.ui?.warAutoWeek || state.meta.currentWeek || 1);
+  return { month, week };
+}
+function getWarRankingSelection(){
+  const month = canonicalMonthKey(state.ui?.warRankingMonth || state.ui?.warAutoMonth || state.meta.currentMonth);
+  const week = Number(state.ui?.warRankingWeek || state.ui?.warAutoWeek || state.meta.currentWeek || 1);
+  return { month, week };
+}
+
+function getRealCurrentWarSelection(){
+  const ref = getWarReferenceDate();
+  const monthKeys = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
+  const month = monthKeys[ref.getMonth()] || canonicalMonthKey(state.meta.currentMonth);
+  const week = Math.max(1, Math.min(4, Math.ceil(ref.getDate() / 7)));
+  return { month, week };
+}
+
+function getRealCurrentMonthWeek(now = new Date()){
+  const monthKeys = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
+  const month = monthKeys[now.getMonth()] || canonicalMonthKey(state.meta.currentMonth);
+  const week = Math.max(1, Math.min(4, Math.ceil(now.getDate() / 7)));
+  return { month, week };
+}
+function getTemporalAutoSyncStamp(now = new Date()){
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+function syncTemporalSelectionsToRealDate(target = state, options = {}){
+  if(!target || typeof target !== 'object') return false;
+  target.meta ||= {};
+  target.ui ||= {};
+
+  const stamp = getTemporalAutoSyncStamp();
+  const alreadySynced = target.ui.__temporalAutoSyncStamp === stamp;
+  if(alreadySynced && !options.force) return false;
+
+  const real = getRealCurrentMonthWeek();
+  const war = getRealCurrentWarSelection();
+  let changed = false;
+
+  const assign = (obj, key, value) => {
+    if(obj[key] !== value){
+      obj[key] = value;
+      changed = true;
+    }
+  };
+
+  assign(target.meta, 'currentMonth', real.month);
+  assign(target.meta, 'currentWeek', real.week);
+
+  assign(target.ui, 'classificationMonth', real.month);
+  assign(target.ui, 'classificationWeek', real.week);
+  assign(target.ui, 'tournamentMonth', real.month);
+  assign(target.ui, 'tournamentWeek', real.week);
+  assign(target.ui, 'hubMonth', real.month);
+  assign(target.ui, 'hubWeek', real.week);
+  assign(target.ui, 'memberProfileMonth', real.month);
+
+  assign(target.ui, 'warAutoMonth', war.month);
+  assign(target.ui, 'warAutoWeek', war.week);
+  assign(target.ui, 'warRankingMonth', war.month);
+  assign(target.ui, 'warRankingWeek', war.week);
+  assign(target.ui, '__temporalAutoSyncStamp', stamp);
+
+  return changed;
+}
+
+function isCurrentWarSelection(selection={}){
+  const current = getRealCurrentWarSelection();
+  return normalizeMonthKey(selection.month || '') === normalizeMonthKey(current.month || '') &&
+         Number(selection.week || 0) === Number(current.week || 0);
+}
+
+function applyWarRowsToState(month, week, rows=[]){
+  try{
+    if(!month || !week || !Array.isArray(rows) || !rows.length) return false;
+    const eligibleRoles = new Set(['Líder','Co-líder','Ancião','Membro','Co-lider','Colíder']);
+    let changed = false;
+    for(const row of rows){
+      const linked = row.linkedMember || findActiveMemberLink(row) || {};
+      const memberName = linked.name || row.name;
+      if(!memberName) continue;
+      const record = ensureWeekMember(month, week, memberName);
+      const mapped = {
+        quinta: Number(row.thu || 0),
+        sexta: Number(row.fri || 0),
+        sabado: Number(row.sat || 0),
+        domingo: Number(row.sun || 0)
+      };
+      for(const day of dayOrder){
+        const total = Math.max(0, Math.min(4, Number(mapped[day] || 0)));
+        const nextArr = Array.from({length:4}, (_, idx) => idx < total);
+        const dayRecord = record.days[day] || { attacks:[false,false,false,false], total:0, fourFour:false };
+        const prev = JSON.stringify(dayRecord.attacks || []);
+        const next = JSON.stringify(nextArr);
+        if(prev != next){
+          dayRecord.attacks = nextArr;
+          changed = true;
+        }
+        dayRecord.total = total;
+        dayRecord.fourFour = total === 4;
+        record.days[day] = dayRecord;
+      }
+      const prevTotal = Number(record.attacksTotal || 0);
+      const prevClinchit = Boolean(record.clinchit);
+      recomputeWeekRecord(record);
+      if(Number(record.attacksTotal || 0) !== prevTotal || Boolean(record.clinchit) !== prevClinchit){
+        changed = true;
+      }
+      record.livePoints = Number(row.points || row.livePoints || 0);
+      record.liveSource = String(row.source || 'war_auto');
+      record.liveUpdatedAt = new Date().toISOString();
+      record.playerTag = normalizePlayerTag(row.playerTag || linked.playerTag || linked.tag || '');
+    }
+    if(changed){
+      saveState();
+    }
+    return changed;
+  }catch(err){
+    console.warn('applyWarRowsToState', err);
+    return false;
+  }
+}
+function monthToNumber(month){
+  const key = String(month||'').trim().toUpperCase();
+  const map = {
+    JANEIRO:'01', JAN:'01',
+    FEVEREIRO:'02', FEV:'02',
+    'MARÇO':'03', MARCO:'03', MAR:'03',
+    ABRIL:'04', ABR:'04',
+    MAIO:'05', MAI:'05',
+    JUNHO:'06', JUN:'06',
+    JULHO:'07', JUL:'07',
+    AGOSTO:'08', AGO:'08',
+    SETEMBRO:'09', SET:'09',
+    OUTUBRO:'10', OUT:'10',
+    NOVEMBRO:'11', NOV:'11',
+    DEZEMBRO:'12', DEZ:'12'
+  };
+  return map[key] || '';
+}
+
+
+function normalizeMonthKey(month){
+  return monthToNumber(month || '') || String(month || '').trim().toUpperCase();
+}
+
+function buildWarManualMemberDocId(row, index=0){
+  return String(row?.playerTag || row?.tag || row?.name || `member_${index}`)
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[.#$/\[\]]/g,'')
+    .replace(/\s+/g,'_')
+    .replace(/[^\w-]/g,'_')
+    .replace(/_+/g,'_')
+    .replace(/^_+|_+$/g,'') || `member_${index}`;
+}
+
+function getCurrentWarDayKey(){
+  const ref = getWarReferenceDate();
+  const dow = ref.getDay();
+  if(dow === 4) return 'thu';
+  if(dow === 5) return 'fri';
+  if(dow === 6) return 'sat';
+  if(dow === 0) return 'sun';
+  return null;
+}
+
+async function saveManualWarOverride(selection, row, payload={}){
+  try{
+    const firebase = window.TOPBRS_FIREBASE;
+    if(!firebase?.app) return false;
+    const { getFirestore, doc, setDoc, serverTimestamp } = await import('https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js');
+    const db = firebase.db || getFirestore(firebase.app);
+    const monthNum = monthToNumber(selection.month);
+    if(!monthNum) return false;
+    const docId = `${new Date().getFullYear()}-${monthNum}-S${Number(selection.week || 1)}`;
+    const memberId = buildWarManualMemberDocId(row);
+    const dayKey = payload.dayKey || getCurrentWarDayKey();
+    const attacks = Math.max(0, Math.min(4, Number(payload.attacks || 0)));
+    const points = Math.max(0, Number(payload.points || 0));
+    const updates = {
+      manualPoints: points,
+      manualUpdatedAt: serverTimestamp(),
+      manualSource: 'admin-override',
+      source: 'manual-override'
+    };
+    updates[`manual${String(dayKey).charAt(0).toUpperCase()}${String(dayKey).slice(1)}`] = attacks;
+    await setDoc(doc(db,'war_history',docId,'members',memberId), updates, { merge:true });
+    await setDoc(doc(db,'war_history',docId), {
+      source:'manual-override',
+      updatedAt: serverTimestamp(),
+      lastSyncOrigin:'manual-override',
+      lastSyncReason:'admin-adjust'
+    }, { merge:true });
+
+    try{
+      const record = ensureWeekMember(selection.month, Number(selection.week || 1), row.name);
+      const dayMap = { thu:'quinta', fri:'sexta', sat:'sabado', sun:'domingo' };
+      const targetDay = dayMap[dayKey] || 'quinta';
+      record.days[targetDay].attacks = Array.from({length:4}, (_, idx) => idx < attacks);
+      record.days[targetDay].total = attacks;
+      record.days[targetDay].fourFour = attacks === 4;
+      record.livePoints = Math.max(Number(record.livePoints || 0), points);
+      record.liveSource = 'manual-override';
+      record.liveUpdatedAt = new Date().toISOString();
+      recomputeWeekRecord(record);
+      const mirrorKey = `${selection.month}-${selection.week}`;
+      if(WAR_AUTO_MIRROR_CACHE?.has(mirrorKey)){
+        const cacheRows = (WAR_AUTO_MIRROR_CACHE.get(mirrorKey) || []).map(item => {
+          if(String(item.name || '').trim().toLowerCase() !== String(row.name || '').trim().toLowerCase()) return item;
+          const next = { ...item, [dayKey]: attacks };
+          next.total = Math.max(Number(next.total || 0), Number(next.thu || 0) + Number(next.fri || 0) + Number(next.sat || 0) + Number(next.sun || 0));
+          next.points = Math.max(Number(next.points || 0), points);
+          next.source = 'manual-override';
+          return next;
+        });
+        WAR_AUTO_MIRROR_CACHE.set(mirrorKey, cacheRows);
+      }
+      saveState();
+    }catch(localErr){
+      console.warn('saveManualWarOverride local reflect', localErr);
+    }
+    return true;
+  }catch(err){
+    console.warn('saveManualWarOverride', err);
+    return false;
+  }
+}
+
+async function promptWarOverride(row, context='war-auto'){
+  if(!isAdminApp() || context !== 'war-auto') return;
+  const selection = getWarAutoSelection();
+  const dayKey = getCurrentWarDayKey() || 'thu';
+  openWarAdjustModal(row, selection, dayKey);
+}
+window.promptWarOverride = promptWarOverride;
+
+async function fetchWarHistoryRows(month, week){
+  try{
+    const firebase = window.TOPBRS_FIREBASE;
+    if(!firebase?.app) return [];
+    const { getFirestore, doc, getDoc, collection, getDocs } = await import('https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js');
+    const db = firebase.db || getFirestore(firebase.app);
+    const monthNum = monthToNumber(month);
+    if(!monthNum) return [];
+    const docId = `${new Date().getFullYear()}-${monthNum}-S${Number(week||1)}`;
+    const snap = await getDoc(doc(db, 'war_history', docId));
+    if(!snap.exists()) return [];
+    const membersSnap = await getDocs(collection(db, 'war_history', docId, 'members'));
+    return membersSnap.docs.map(d => {
+      const m = d.data() || {};
+      const apiThu = Number(m.thu || m.days?.thu || 0);
+      const apiFri = Number(m.fri || m.days?.fri || 0);
+      const apiSat = Number(m.sat || m.days?.sat || 0);
+      const apiSun = Number(m.sun || m.days?.sun || 0);
+      const manualThu = Number(m.manualThu || 0);
+      const manualFri = Number(m.manualFri || 0);
+      const manualSat = Number(m.manualSat || 0);
+      const manualSun = Number(m.manualSun || 0);
+      const thu = Math.max(apiThu, manualThu);
+      const fri = Math.max(apiFri, manualFri);
+      const sat = Math.max(apiSat, manualSat);
+      const sun = Math.max(apiSun, manualSun);
+      const total = Math.max(Number(m.attacks || m.totalAttacks || 0), (thu+fri+sat+sun));
+      const points = Math.max(Number(m.points || m.fame || 0), Number(m.manualPoints || 0));
+      return {
+        name: m.name || d.id,
+        playerTag: normalizePlayerTag(m.playerTag || m.tag || ''),
+        role: m.role || 'Membro',
+        thu, fri, sat, sun, total,
+        points,
+        clinchit: Boolean(m.clinchit),
+        weekId: docId,
+        source: String(m.source || 'war_history')
+      };
+    });
+  }catch(err){
+    console.warn('fetchWarHistoryRows', err);
+    return [];
+  }
+}
+
+async function saveCurrentWarToFirestore(rows, selection, extra = {}){
+  try{
+    if(!Array.isArray(rows) || !rows.length) return false;
+    const firebase = window.TOPBRS_FIREBASE;
+    if(!firebase?.app) return false;
+    const { getFirestore, doc, setDoc, collection, writeBatch, serverTimestamp } = await import('https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js');
+    const db = firebase.db || getFirestore(firebase.app);
+    const docId = `${new Date().getFullYear()}-${monthToNumber(selection.month)}-S${Number(selection.week || 1)}`;
+    const rootRef = doc(db, 'war_history', docId);
+    await setDoc(rootRef, {
+      week: `S${Number(selection.week || 1)}`,
+      month: monthLabel(selection.month),
+      year: new Date().getFullYear(),
+      clanTag: String(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ'),
+      source: 'api-live',
+      updatedAt: serverTimestamp(),
+      membersCount: rows.length,
+      lastSyncOrigin: extra.source || 'api-live',
+      lastSyncReason: extra.reason || 'auto-refresh'
+    }, { merge: true });
+
+    const batch = writeBatch(db);
+    const membersCol = collection(db, 'war_history', docId, 'members');
+    rows.forEach((row, index) => {
+      const memberId = String(row.playerTag || row.name || `member_${index}`)
+        .normalize('NFD').replace(/[̀-ͯ]/g,'')
+        .replace(/[.#$/\[\]]/g,'')
+        .replace(/\s+/g,'_')
+        .replace(/[^\w-]/g,'_')
+        .replace(/_+/g,'_')
+        .replace(/^_+|_+$/g,'');
+      const ref = doc(membersCol, memberId || `member_${index}`);
+      batch.set(ref, {
+        name: row.name || memberId,
+        tag: normalizePlayerTag(row.playerTag || row.tag || ''),
+        playerTag: normalizePlayerTag(row.playerTag || row.tag || ''),
+        role: row.role || 'Membro',
+        attacks: Number(row.total || 0),
+        totalAttacks: Number(row.total || 0),
+        thu: Number(row.thu || 0),
+        fri: Number(row.fri || 0),
+        sat: Number(row.sat || 0),
+        sun: Number(row.sun || 0),
+        days: {
+          thu: Number(row.thu || 0),
+          fri: Number(row.fri || 0),
+          sat: Number(row.sat || 0),
+          sun: Number(row.sun || 0)
+        },
+        points: Number(row.points || row.livePoints || 0),
+        fame: Number(row.points || row.livePoints || 0),
+        repairPoints: Number(row.repairPoints || 0),
+        decksUsed: Number(row.total || row.decksUsed || 0),
+        clinchit: Number(row.total || 0) >= 16,
+        source: 'api-live',
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    });
+    await batch.commit();
+    return true;
+  }catch(err){
+    console.warn('saveCurrentWarToFirestore', err);
+    return false;
+  }
+}
+
+function renderWarRankingPeriodControls(){
+  const selection = getWarRankingSelection();
+  const monthButtons = (seedData.meta.months || []).map((m) => `<button class="hero-chip ${m===selection.month?'active':''}" type="button" data-war-ranking-month="${esc(m)}">${esc(monthLabel(m).slice(0,3))}</button>`).join('');
+  const weekButtons = [1,2,3,4].map((week) => `<button class="hero-chip ${week===selection.week?'active':''}" type="button" data-war-ranking-week="${week}">S${week}</button>`).join('');
+  if(ui.warRankingMonthChipBar) ui.warRankingMonthChipBar.innerHTML = monthButtons;
+  if(ui.warRankingWeekChipBar) ui.warRankingWeekChipBar.innerHTML = weekButtons;
+}
+
+async function prepareWarAutoWeekFromRoster(options = {}){
+  if(WAR_AUTO_SANDBOX){
+    return { prepared: 0, skipped: true, sandbox: true };
+  }
+  const service = window.WAR_SERVICE;
+  if(!service || typeof service.initWeekForMembers !== 'function'){
+    if(!options?.silent) alert('O módulo da Guerra Auto ainda não está pronto para preparar os membros reais.');
+    return { prepared: 0, skipped: true };
+  }
+  const btn = ui.warAutoPrepareBtn;
+  if(btn) btn.disabled = true;
+  try{
+    const roster = activeMembers().map(member => ({
+      id: member.id,
+      name: member.name,
+      role: member.role,
+      playerTag: member.playerTag || member.tag || ''
+    }));
+    const selection = getWarAutoSelection();
+    const signature = `${selection.month}|${selection.week}|` + roster.map(m => `${m.name}:${m.role}:${m.playerTag || ''}`).join('||');
+    if(options?.silent && state.ui?.warAutoPreparedSignature === signature){
+      return { prepared: roster.length, cached: true };
+    }
+    const result = await service.initWeekForMembers(roster, { month: selection.month, week: selection.week, silent: true });
+    state.ui ||= {};
+    state.ui.warAutoPreparedSignature = signature;
+    saveState();
+    if(result?.prepared && !options?.silent){
+      alert(`Base automática preparada para ${result.prepared} membro(s).`);
+    }
+    return result || { prepared: roster.length };
+  }catch(err){
+    console.error('prepareWarAutoWeekFromRoster', err);
+    if(!options?.silent) alert('Não foi possível preparar os membros reais agora.');
+    return { prepared: 0, error: true };
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function ensureWarAutoWeekPrepared(options = {}){
+  return prepareWarAutoWeekFromRoster({ ...options, silent: true });
+}
+
+function renderWarAutoPeriodControls(){
+  const selection = getWarAutoSelection();
+  const monthButtons = (seedData.meta.months || []).map((m) => {
+    const shortLabel = monthLabel(m).slice(0,3);
+    return `<button class="hero-chip ${m===selection.month?'active':''}" type="button" data-war-auto-month="${esc(m)}">${esc(shortLabel)}</button>`;
+  }).join('');
+  const weekButtons = [1,2,3,4].map((week) => {
+    return `<button class="hero-chip ${week===selection.week?'active':''}" type="button" data-war-auto-week="${week}">S${week}</button>`;
+  }).join('');
+  if(ui.warAutoMonthChipBar) ui.warAutoMonthChipBar.innerHTML = monthButtons;
+  if(ui.warAutoWeekChipBar) ui.warAutoWeekChipBar.innerHTML = weekButtons;
+  requestAnimationFrame(() => {
+    centerActiveChipInBar(ui.warAutoMonthChipBar);
+    centerActiveChipInBar(ui.warAutoWeekChipBar);
+  });
+}
+
+const WAR_AUTO_MIRROR_CACHE = new Map();
+let WAR_AUTO_MIRROR_LAST_KEY = '';
+
+
+function mergeWarRowsKeepingBest(currentRows = [], historyRows = []){
+  const map = new Map();
+  const put = (row={}) => {
+    const key = normalizePlayerTag(row.playerTag || row.tag || '') || normalizeMatchText(row.name || '');
+    if(!key) return;
+    const existing = map.get(key) || {};
+    const merged = {
+      ...existing,
+      ...row,
+      name: row.name || existing.name || '',
+      playerTag: row.playerTag || row.tag || existing.playerTag || existing.tag || '',
+      tag: row.playerTag || row.tag || existing.tag || existing.playerTag || '',
+      role: row.role || existing.role || 'Membro',
+      thu: Math.max(Number(existing.thu || 0), Number(row.thu || 0)),
+      fri: Math.max(Number(existing.fri || 0), Number(row.fri || 0)),
+      sat: Math.max(Number(existing.sat || 0), Number(row.sat || 0)),
+      sun: Math.max(Number(existing.sun || 0), Number(row.sun || 0)),
+      points: Math.max(Number(existing.points || existing.livePoints || 0), Number(row.points || row.livePoints || 0))
+    };
+    merged.total = Math.max(Number(existing.total || 0), Number(row.total || 0), Number(merged.thu + merged.fri + merged.sat + merged.sun));
+    map.set(key, merged);
+  };
+  historyRows.forEach(put);
+  currentRows.forEach(put);
+  return Array.from(map.values());
+}
+
+function ensureWarAdjustModal(){
+  let modal = document.getElementById('warAdjustModal');
+  if(modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'warAdjustModal';
+  modal.className = 'war-adjust-modal hidden';
+  modal.innerHTML = `
+    <div class="war-adjust-backdrop" data-war-adjust-close="1"></div>
+    <div class="war-adjust-dialog">
+      <div class="war-adjust-head">
+        <div>
+          <small>AJUSTE MANUAL</small>
+          <h3 id="warAdjustTitle">Atualizar membro</h3>
+        </div>
+        <button type="button" class="war-adjust-close" data-war-adjust-close="1">×</button>
+      </div>
+      <div class="war-adjust-body">
+        <label class="war-adjust-label">
+          <span>Dia da guerra</span>
+          <select id="warAdjustDay" class="war-adjust-input">
+            <option value="thu">Quinta</option>
+            <option value="fri">Sexta</option>
+            <option value="sat">Sábado</option>
+            <option value="sun">Domingo</option>
+          </select>
+        </label>
+        <label class="war-adjust-label">
+          <span>Ataques do dia</span>
+          <select id="warAdjustAttacks" class="war-adjust-input">
+            <option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+          </select>
+        </label>
+        <label class="war-adjust-label">
+          <span>Pontos da guerra (fame)</span>
+          <input id="warAdjustPoints" class="war-adjust-input" type="number" inputmode="numeric" pattern="[0-9]*" min="0" step="1" placeholder="Ex: 400" />
+        </label>
+        <div class="war-adjust-meta" id="warAdjustMeta"></div>
+      </div>
+      <div class="war-adjust-actions">
+        <button type="button" class="ghost" data-war-adjust-close="1">Cancelar</button>
+        <button type="button" class="primary" id="warAdjustSaveBtn">Salvar ajuste</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', async (e) => {
+    if(e.target.closest('[data-war-adjust-close="1"]')){
+      closeWarAdjustModal();
+      return;
+    }
+    const saveBtn = e.target.closest('#warAdjustSaveBtn');
+    if(saveBtn){
+      const payload = modal._payload || null;
+      if(!payload) return;
+      saveBtn.disabled = true;
+      try{
+        const selectedDay = String(document.getElementById('warAdjustDay')?.value || payload.dayKey || 'thu');
+        const attacks = Math.max(0, Math.min(4, Number(document.getElementById('warAdjustAttacks')?.value || 0)));
+        const points = Math.max(0, Number(document.getElementById('warAdjustPoints')?.value || 0));
+        const ok = await saveManualWarOverride(payload.selection, payload.row, { dayKey: selectedDay, attacks, points });
+        if(ok){
+          closeWarAdjustModal();
+          showToast('Ajuste manual salvo.');
+          await renderWarAutoView({ force:true, silent:true });
+          render();
+        }else{
+          showToast('Não foi possível salvar o ajuste manual.', 'error');
+        }
+      }finally{
+        saveBtn.disabled = false;
+      }
+    }
+  });
+  modal.addEventListener('change', (e) => {
+    if(e.target && e.target.id === 'warAdjustDay'){
+      const payload = modal._payload || null;
+      const dayVal = String(e.target.value || 'thu');
+      if(payload){
+        payload.dayKey = dayVal;
+        const attacks = modal.querySelector('#warAdjustAttacks');
+        if(attacks) attacks.value = String(Math.max(0, Math.min(4, Number(payload.row?.[dayVal] || 0))));
+      }
+    }
+  });
+  return modal;
+}
+
+function closeWarAdjustModal(){
+  const modal = document.getElementById('warAdjustModal');
+  if(!modal) return;
+  modal.classList.add('hidden');
+  modal._payload = null;
+}
+
+function openWarAdjustModal(row, selection, dayKey){
+  const modal = ensureWarAdjustModal();
+  modal._payload = { row, selection, dayKey };
+  const title = modal.querySelector('#warAdjustTitle');
+  const day = modal.querySelector('#warAdjustDay');
+  const attacks = modal.querySelector('#warAdjustAttacks');
+  const points = modal.querySelector('#warAdjustPoints');
+  const meta = modal.querySelector('#warAdjustMeta');
+  const selectedDay = String(dayKey || 'thu');
+  if(title) title.textContent = row?.name || 'Atualizar membro';
+  if(day) day.value = selectedDay;
+  if(attacks) attacks.value = String(Math.max(0, Math.min(4, Number(row?.[selectedDay] || 0))));
+  if(points) points.value = String(Number(row?.points || row?.livePoints || 0) || 0);
+  if(meta) meta.textContent = `Ajuste visível só para admin • você pode alterar qualquer dia da semana`;
+  modal.classList.remove('hidden');
+}
+
+function renderWarAutoDots(count=0, max=4){
+  return Array.from({length:max}, (_, idx) => `<span class="war-auto-dot ${idx < Number(count || 0) ? 'filled' : 'missed'}"></span>`).join('');
+}
+
+
+function getWarAutoRowsFromManual(month, week, options = {}){
+  const cacheKey = `${month}-${week}`;
+  const force = Boolean(options.force);
+  if(!force && WAR_AUTO_MIRROR_CACHE.has(cacheKey)){
+    return WAR_AUTO_MIRROR_CACHE.get(cacheKey).map(item => ({ ...item }));
+  }
+  const ctx = monthContext(month);
+  const weekIndex = Math.max(0, Math.min(3, Number(week || 1) - 1));
+  const rows = (ctx.summaries || []).map((item) => {
+    const weekData = item.weekly?.[weekIndex] || blankWeekRecord(item.member?.name || '');
+    return {
+      playerTag: item.member?.playerTag || item.member?.tag || item.member?.name || '',
+      name: item.member?.name || item.member?.nick || 'Sem nome',
+      role: item.member?.role || 'Membro',
+      thu: Number(weekData.days?.quinta?.total || 0),
+      fri: Number(weekData.days?.sexta?.total || 0),
+      sat: Number(weekData.days?.sabado?.total || 0),
+      sun: Number(weekData.days?.domingo?.total || 0),
+      total: Number(weekData.attacksTotal || 0),
+      weekId: `${monthLabel(month)} • Semana ${week}`
+    };
+  });
+  WAR_AUTO_MIRROR_CACHE.set(cacheKey, rows.map(item => ({ ...item })));
+  WAR_AUTO_MIRROR_LAST_KEY = cacheKey;
+  return rows;
+}
+
+function renderWarAutoSummaryCards(rows){
+  const totalMembers = rows.length;
+  const totalAttacks = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+  const completeCount = rows.filter(row => Number(row.total || 0) >= 16).length;
+  const pendingCount = rows.filter(row => Number(row.total || 0) < 16).length;
+  const riskCount = rows.filter(row => Number(row.total || 0) <= 8).length;
+  const totalPoints = rows.reduce((sum, row) => sum + Number(row.points || row.livePoints || 0), 0);
+  return `
+    <div class="war-auto-card tone-blue">
+      <small>Membros lidos</small>
+      <strong>${totalMembers}</strong>
+      <span>${completeCount} completos</span>
+    </div>
+    <div class="war-auto-card tone-gold">
+      <small>Ataques na semana</small>
+      <strong>${totalAttacks}</strong>
+      <span>${totalPoints ? `${totalPoints.toLocaleString('pt-BR')} pts na guerra` : `Meta total ${totalMembers * 16}`}</span>
+    </div>
+    <div class="war-auto-card tone-green">
+      <small>Fecharam 16/16</small>
+      <strong>${completeCount}</strong>
+      <span>${pendingCount} pendentes</span>
+    </div>
+    <div class="war-auto-card tone-red">
+      <small>Risco</small>
+      <strong>${riskCount}</strong>
+      <span>-50% de ataque na semana</span>
+    </div>
+  `;
+}
+
+function getWarAutoCardKey(member = {}, index = 0){
+  return String(member.playerTag || member.name || `war-auto-${index}`);
+}
+function isWarAutoExpanded(member = {}, index = 0){
+  const key = getWarAutoCardKey(member, index);
+  return Boolean(state.ui.warAutoExpanded?.[key]);
+}
+function toggleWarAutoMember(key){
+  if(!key) return;
+  state.ui.warAutoExpanded ||= {};
+  const nextExpanded = !state.ui.warAutoExpanded[key];
+  state.ui.warAutoExpanded[key] = nextExpanded;
+  const safeKey = String(key).replace(/"/g, '&quot;');
+  const card = document.querySelector(`[data-war-auto-card-key="${CSS.escape(String(key))}"]`);
+  if(card){
+    card.classList.toggle('expanded', nextExpanded);
+    card.classList.toggle('collapsed', !nextExpanded);
+    const body = card.querySelector('.war-auto-days');
+    if(body){
+      body.classList.toggle('expanded', nextExpanded);
+      body.classList.toggle('collapsed', !nextExpanded);
+    }
+    const btn = card.querySelector('[data-war-auto-toggle]');
+    if(btn){
+      btn.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
+      btn.setAttribute('title', nextExpanded ? 'Recolher detalhes' : 'Expandir detalhes');
+      const chevron = btn.querySelector('.war-auto-chevron');
+      if(chevron) chevron.textContent = nextExpanded ? '▾' : '▸';
+    }
+    return;
+  }
+  renderWarAutoView();
+  renderWarRankingView();
+  renderMembersSyncView();
+  renderApiLogsView();
+  renderHubLeaderView();
+  renderHubRiskView();
+  renderHubDecisionView();
+  renderHubClanView();
+  updateNotificationBadge();
+  renderNotificationCenter();
+  maybeShowPendingMemberAlert();
+  updateDrawerProfileSummary();
+  renderDecksView();
+}
+window.toggleWarAutoMember = toggleWarAutoMember;
+
+
+function topbrsIsExactLiveSelection(selectedMonthKey, selectedWeekKey, liveMonthKey, liveWeekKey){
+  return String(selectedMonthKey||'') === String(liveMonthKey||'') &&
+         String(selectedWeekKey||'') === String(liveWeekKey||'');
+}
+
+async function getWarAutoRowsUsingClassificationSource(selection, force=false){
+  const previousMonth = state.ui?.warRankingMonth;
+  const previousWeek = state.ui?.warRankingWeek;
+  state.ui ||= {};
+  state.ui.warRankingMonth = selection.month;
+  state.ui.warRankingWeek = Number(selection.week || 1);
+  try{
+    let rows = [];
+    try{
+      rows = await getEligibleWarRankingRows(Boolean(force));
+    }catch(err){
+      console.warn('getWarAutoRowsUsingClassificationSource ranking source', err);
+      rows = [];
+    }
+    if(Array.isArray(rows) && rows.length) return rows.map(row => ({ ...row }));
+    try{
+      rows = await fetchWarHistoryRows(selection.month, selection.week);
+    }catch(err){
+      rows = [];
+    }
+    if(Array.isArray(rows) && rows.length){
+      return rows.map(row => {
+        const linked = findActiveMemberLink(row);
+        return linked ? { ...row, linkedMember: linked } : { ...row };
+      });
+    }
+    if(isCurrentWarSelection(selection)){
+      try{
+        const race = await fetchClashCurrentRiverRace(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ', { force: Boolean(force) });
+        const liveRows = buildWarAutoApiRowsFromRace(race, selection);
+        if(Array.isArray(liveRows) && liveRows.length){
+          await saveCurrentWarToFirestore(liveRows, selection, { source:'api-live', reason: force ? 'manual-refresh' : 'war-auto-bootstrap' });
+          setWarHistoryMirrorRows(selection.month, selection.week, liveRows);
+          return liveRows.map(row => {
+            const linked = findActiveMemberLink(row);
+            return linked ? { ...row, linkedMember: linked } : { ...row };
+          });
+        }
+      }catch(err){
+        console.warn('getWarAutoRowsUsingClassificationSource live bootstrap', err);
+      }
+    }
+    return [];
+  }finally{
+    state.ui.warRankingMonth = previousMonth;
+    state.ui.warRankingWeek = previousWeek;
+  }
+}
+
+async function renderWarAutoView(options = {}){
+  if(!ui.warAutoBoard) return;
+  if(ui.warAutoBoard.dataset.loading === '1') return;
+  ui.warAutoBoard.dataset.loading = '1';
+  ui.warAutoBoard.innerHTML = '<div class="empty">Carregando painel da guerra...</div>';
+  if(ui.warAutoMeta) ui.warAutoMeta.textContent = '';
+  try{
+    const selection = getWarAutoSelection();
+    let rows = await getWarAutoRowsUsingClassificationSource(selection, Boolean(options.force));
+    let source = rows.some(row => row.apiLive || row.source === 'api-live') ? 'api-live' : (rows.length ? 'war_history' : 'empty');
+    let liveEnabled = source === 'api-live';
+    const sorted = [...rows].sort((a,b)=> (Number(b.total||0) - Number(a.total||0)) || String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'));
+    const active = activeMembers() || [];
+    const activeMapByName = new Map(active.map(member => [normalizeMatchText(member.name || member.nick || ''), member]));
+    const activeMapByTag = new Map(active.map(member => [normalizePlayerTag(member.playerTag || member.tag || ''), member]));
+    const filteredRows = sorted.map(member => {
+      const linked = member.linkedMember || activeMapByTag.get(normalizePlayerTag(member.playerTag || member.tag || '')) || activeMapByName.get(normalizeMatchText(member.name || '')) || {};
+      return { ...member, linkedMember: linked };
+    });
+    state.ui ||= {};
+    state.ui.lastWarAutoLive = {
+      updatedAt: new Date().toISOString(),
+      liveEnabled,
+      participants: Array.isArray(rows) ? rows.length : 0,
+      filtered: filteredRows.length,
+      month: selection.month,
+      week: selection.week,
+      apiBase: await getRuntimeClashApiBase(false),
+      source
+    };
+    const classificationChanged = applyWarRowsToState(selection.month, selection.week, filteredRows);
+    if(classificationChanged){
+      try{ renderClassification(); }catch(e){}
+    }
+    if(ui.warAutoStats) ui.warAutoStats.innerHTML = renderWarAutoSummaryCards(filteredRows);
+    if(!filteredRows.length){
+      ui.warAutoBoard.innerHTML = '<div class="empty war-auto-empty"><strong>Nenhum dado encontrado para este período.</strong></div>';
+    }else{
+      ui.warAutoBoard.innerHTML = filteredRows.map((member, index) => {
+        const linkedMember = member.linkedMember || findActiveMemberLink(member) || {};
+        const role = linkedMember.role || member.role || 'Membro';
+        const total = Number(member.total||0);
+        const isComplete = total >= 16;
+        const isRisk = total <= 8;
+        const points = Number(member.points || member.livePoints || 0);
+        const statusClass = isComplete ? 'good' : isRisk ? 'bad' : 'warn';
+        const statusLabel = isComplete ? '16/16 fechado' : isRisk ? 'Baixo desempenho' : 'Parcial';
+        const statusNote = isRisk ? '<small class="war-auto-status-note">-50% de ataque na semana</small>' : '';
+        const cardKey = getWarAutoCardKey(member, index);
+        const expanded = isWarAutoExpanded(member, index);
+        const bodyId = `war-auto-days-${index}-${cardKey.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+        return `<article class="war-auto-member war-auto-member-card ${expanded ? 'expanded' : 'collapsed'} ${memberMatchesCurrentUser(linkedMember) ? 'is-self' : ''}" data-war-auto-card-key="${esc(cardKey)}">
+            <div class="war-auto-member-top">
+              <div class="war-auto-member-head">
+                <p class="war-auto-rank">#${index + 1} • ${esc(role)}</p>
+                <h4>${esc(member.name || member.playerTag || 'Sem nome')} ${memberMatchesCurrentUser(linkedMember) ? '<span class="self-badge">VOCÊ</span>' : ''}</h4>
+                <div class="war-auto-summary-left">
+                  <strong class="war-auto-total-value">${Number(member.total || 0)}/16</strong>
+                  <span class="chip ${statusClass}">${statusLabel}</span>${statusNote}${points ? `<span class="war-auto-live-pill ${isRisk ? 'bad' : ''}">${points.toLocaleString('pt-BR')} pts</span>` : ''}${canAdjustPointsForMember({ name: member.name || '', playerTag: member.playerTag || '', role }) ? `<button class="war-adjust-btn" type="button" data-war-adjust='${esc(JSON.stringify({name: member.name || '', playerTag: member.playerTag || '', role, thu: Number(member.thu||0), fri: Number(member.fri||0), sat: Number(member.sat||0), sun: Number(member.sun||0), total: Number(member.total||0), points: Number(points||0)}))}'>Ajuste manual</button>` : ''}
+                </div>
+              </div>
+              <button class="war-auto-toggle" type="button" data-war-auto-toggle="${esc(cardKey)}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${esc(bodyId)}" title="${expanded ? 'Recolher detalhes' : 'Expandir detalhes'}"><span class="war-auto-chevron">${expanded ? '▾' : '▸'}</span></button>
+            </div>
+            <div id="${esc(bodyId)}" class="war-auto-days ${expanded ? 'expanded' : 'collapsed'}">
+              <div class="war-auto-day"><span>Qui</span><div class="war-auto-dots">${renderWarAutoDots(member.thu)}</div><b>${Number(member.thu||0)}/4</b></div>
+              <div class="war-auto-day"><span>Sex</span><div class="war-auto-dots">${renderWarAutoDots(member.fri)}</div><b>${Number(member.fri||0)}/4</b></div>
+              <div class="war-auto-day"><span>Sáb</span><div class="war-auto-dots">${renderWarAutoDots(member.sat)}</div><b>${Number(member.sat||0)}/4</b></div>
+              <div class="war-auto-day"><span>Dom</span><div class="war-auto-dots">${renderWarAutoDots(member.sun)}</div><b>${Number(member.sun||0)}/4</b></div>
+            </div>
+          </article>`;
+      }).join('');
+    }
+  }catch(err){
+    console.error('renderWarAutoView', err);
+    if(ui.warAutoStats) ui.warAutoStats.innerHTML = '';
+    ui.warAutoBoard.innerHTML = '<div class="empty">Não foi possível carregar a Guerra Auto agora.</div>';
+    if(ui.warAutoMeta) ui.warAutoMeta.textContent = '';
+  }finally{
+    delete ui.warAutoBoard.dataset.loading;
+  }
+}
+
+
+async function getEligibleWarRankingRows(force=false){
+  const selection = getWarRankingSelection();
+  let rows = await fetchWarHistoryRows(selection.month, selection.week);
+  setWarHistoryMirrorRows(selection.month, selection.week, rows);
+  if(!rows.length && isCurrentWarSelection(selection)){
+    try{
+      const race = await fetchClashCurrentRiverRace(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ', { force: Boolean(force) });
+      rows = buildWarAutoApiRowsFromRace(race, selection);
+    }catch(e){
+      rows = [];
+    }
+  }
+  return rows
+    .map(row => {
+      const linked = findActiveMemberLink(row);
+      return linked ? { ...row, linkedMember: linked } : null;
+    })
+    .filter(Boolean)
+    .filter(row => roleEligibleForSystem(row.linkedMember?.role || row.role || ''))
+    .sort((a,b) => (Number(b.points||0) - Number(a.points||0)) || (Number(b.total||0) - Number(a.total||0)) || String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'));
+}
+
+async function renderWarRankingView(force=false){
+  if(!ui.warRankingBoard) return;
+  renderWarRankingPeriodControls();
+  ui.warRankingBoard.innerHTML = '<div class="empty">Carregando ranking da guerra...</div>';
+  try{
+    const rows = await getEligibleWarRankingRows(force);
+    const selection = getWarRankingSelection();
+    if(ui.warRankingMeta){
+      ui.warRankingMeta.textContent = `${monthLabel(selection.month)} • Semana ${selection.week} • ${rows.length} membros elegíveis • ordenado por pts (fame)`;
+    }
+    if(!rows.length){
+      ui.warRankingBoard.innerHTML = '<div class="empty">Nenhum membro elegível encontrado neste período.</div>';
+      return;
+    }
+    ui.warRankingBoard.innerHTML = `<div class="war-ranking-table"><div class="war-ranking-head"><div>Pos</div><div>Nick</div><div>Pts</div><div>Atk</div></div>${rows.map((row, index) => {
+          const self = memberMatchesCurrentUser(row.linkedMember || row);
+          return `<div class="war-ranking-row ${index===0?'top-1':index===1?'top-2':index===2?'top-3':''} ${self?'is-self':''}"><div class="pos">#${index + 1}</div><div class="nick">${esc(row.linkedMember?.name || row.name || 'Sem nome')} ${self ? '<span class="self-badge">VOCÊ</span>' : ''}</div><div>${Number(row.points || 0).toLocaleString('pt-BR')}</div><div>${Number(row.total || 0)}</div></div>`;
+        }).join('')}</div>`;
+  }catch(err){
+    console.error('renderWarRankingView', err);
+    if(ui.warRankingMeta) ui.warRankingMeta.textContent = 'Não foi possível montar o ranking da guerra agora.';
+    ui.warRankingBoard.innerHTML = '<div class="empty">Ranking da guerra indisponível no momento.</div>';
+  }
+}
+
+
+async function renderMembersSyncView(force=false){
+  if(!ui.membersSyncBoard) return;
+  ui.membersSyncBoard.innerHTML = '<div class="empty sync-empty">Lendo membros atuais do clã...</div>';
+  if(ui.membersSyncLastSyncStatus) ui.membersSyncLastSyncStatus.textContent = force ? 'Atualizando' : 'Preparando';
+  try{
+    const clan = await fetchClashClanProfile(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ', { force });
+    const members = Array.isArray(clan?.memberList) ? clan.memberList : [];
+    const rows = members.sort((a,b)=> String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'));
+    const eligibleCount = rows.filter(member => {
+      const roleText = member.role === 'leader' ? 'Líder' : member.role === 'coLeader' ? 'Co-líder' : member.role === 'elder' ? 'Ancião' : 'Membro';
+      return roleEligibleForSystem(roleText);
+    }).length;
+    const integratedCount = rows.filter(member => findActiveMemberLink({ name: member.name, playerTag: member.tag, tag: member.tag })).length;
+
+    if(ui.membersSyncCount) ui.membersSyncCount.textContent = String(rows.length);
+    if(ui.membersSyncEligible) ui.membersSyncEligible.textContent = `${eligibleCount} elegíveis • ${integratedCount} integrados`;
+    if(ui.membersSyncLastSync){
+      ui.membersSyncLastSync.textContent = new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+    }
+    if(ui.membersSyncLastSyncStatus){
+      ui.membersSyncLastSyncStatus.textContent = rows.length ? 'Concluída' : 'Sem dados';
+    }
+
+    if(ui.membersSyncMeta){
+      ui.membersSyncMeta.textContent = `${rows.length} membro(s) encontrados no clã • toque em Integrar para pré-cadastrar no sistema`;
+    }
+    if(!rows.length){
+      ui.membersSyncBoard.innerHTML = '<div class="empty sync-empty">Nenhum membro retornado pela API do clã.</div>';
+      return;
+    }
+    ui.membersSyncBoard.innerHTML = rows.map(member => {
+      const roleText = member.role === 'leader' ? 'Líder' : member.role === 'coLeader' ? 'Co-líder' : member.role === 'elder' ? 'Ancião' : 'Membro';
+      const eligible = roleEligibleForSystem(roleText);
+      const existing = findActiveMemberLink({ name: member.name, playerTag: member.tag, tag: member.tag });
+      const payload = encodeURIComponent(JSON.stringify({ name: member.name, tag: member.tag, role: roleText }));
+      return `<article class="members-sync-item sync-member-card ${existing ? 'is-integrated' : eligible ? 'is-eligible' : 'is-locked'}">
+        <div class="sync-member-main">
+          <strong>${esc(member.name || 'Sem nome')}</strong>
+          <small>${esc(member.tag || '—')}</small>
+        </div>
+        <div><span class="members-sync-badge ${eligible ? '' : 'low'}">${esc(roleText)}</span></div>
+        <div><small>${existing ? 'Já integrado' : eligible ? 'Elegível ao sistema' : 'Cargo abaixo do permitido'}</small></div>
+        <div class="members-sync-actions">${existing ? '<button class="ghost small" type="button" disabled>Integrado</button>' : `<button class="${eligible ? 'primary' : 'ghost'} small" type="button" data-sync-integrate="${payload}" ${eligible ? '' : 'disabled'}>Integrar</button>`}</div>
+      </article>`;
+    }).join('');
+  }catch(err){
+    console.error('renderMembersSyncView', err);
+    if(ui.membersSyncMeta) ui.membersSyncMeta.textContent = 'Falha ao sincronizar membros do clã.';
+    if(ui.membersSyncLastSyncStatus) ui.membersSyncLastSyncStatus.textContent = 'Falhou';
+    ui.membersSyncBoard.innerHTML = '<div class="empty sync-empty">Não foi possível ler os membros do clã agora.</div>';
+  }
+}
+
+async function renderApiLogsView(force=false){
+  if(!ui.apiLogsBoard) return;
+  ui.apiLogsBoard.innerHTML = '<div class="empty">Lendo diagnóstico da API...</div>';
+  try{
+    const config = await loadApiConfigSnapshot(force);
+    let raceState = 'indisponível';
+    let participants = 0;
+    let clanName = '—';
+    try{
+      const race = await fetchClashCurrentRiverRace(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ', { force });
+      raceState = String(race?.state || 'ok');
+      participants = Array.isArray(race?.clan?.participants) ? race.clan.participants.length : 0;
+      clanName = String(race?.clan?.name || '—');
+    }catch(e){}
+    const live = state.ui?.lastWarAutoLive || {};
+    const currentSel = getRealCurrentWarSelection();
+    const dayKey = getCurrentWarDayKey();
+    const dayLabel = dayKey === 'thu' ? 'Quinta' : dayKey === 'fri' ? 'Sexta' : dayKey === 'sat' ? 'Sábado' : dayKey === 'sun' ? 'Domingo' : 'Fora da janela';
+    const readMode = participants > 0 ? 'Live' : (live.source === 'empty' ? 'Sem dados' : 'Fallback');
+    if(ui.apiLogsMeta){
+      ui.apiLogsMeta.textContent = 'Painel técnico para líder/editor • sem impacto direto no sistema.';
+    }
+    ui.apiLogsBoard.innerHTML = `
+      <div class="api-logs-grid">
+        <article class="api-log-card"><small>API base</small><strong>${config.clashApiBase ? 'OK' : '—'}</strong><div class="api-log-code">${esc(config.clashApiBase || 'Não definida')}</div></article>
+        <article class="api-log-card"><small>Clã / Race state</small><strong>${esc(clanName)}</strong><div class="api-log-code">${esc(raceState)} • Participantes: ${participants}</div></article>
+        <article class="api-log-card"><small>Origem</small><strong>${esc(participants > 0 ? 'api-live + war_history' : (live.source || config.source || 'war_history'))}</strong><div class="api-log-code">${esc(live.updatedAt || config.updatedAt || 'sem horário')}</div></article>
+        <article class="api-log-card"><small>Última leitura app</small><strong>${readMode}</strong><div class="api-log-code">${esc(live.updatedAt || 'sem leitura')}</div></article>
+        <article class="api-log-card"><small>Semana real</small><strong>${esc(currentSel.month || '—')} • S${Number(currentSel.week || 0)}</strong><div class="api-log-code">Dia ativo: ${esc(dayLabel)}</div></article>
+        <article class="api-log-card"><small>Sincronização</small><strong>${esc(live.reason || config.lastSyncReason || '—')}</strong><div class="api-log-code">Origem salva: ${esc(config.lastSyncOrigin || live.source || '—')}</div></article>
+      </div>
+    `;
+  }catch(err){
+    console.error('renderApiLogsView', err);
+    if(ui.apiLogsMeta) ui.apiLogsMeta.textContent = 'Não foi possível montar os logs da API.';
+    ui.apiLogsBoard.innerHTML = '<div class="empty">Logs da API indisponíveis no momento.</div>';
+  }
+}
+
+function integrateSyncedMember(payloadEncoded=''){
+  try{
+    const payload = JSON.parse(decodeURIComponent(payloadEncoded || '{}'));
+    const name = String(payload.name || '').trim();
+    const playerTag = normalizePlayerTag(payload.tag || '');
+    const role = String(payload.role || 'Membro').trim();
+    if(!name || !playerTag) throw new Error('Dados do membro inválidos.');
+    const existing = activeMembers(true).find(member => normalizePlayerTag(member.playerTag || member.tag || '') === playerTag || normalizeMatchText(member.name || '') === normalizeMatchText(name));
+    if(existing){
+      existing.name = existing.name || name;
+      existing.role = role || existing.role || 'Membro';
+      existing.playerTag = playerTag;
+      existing.tag = playerTag;
+      existing.eligibleTournament = roleEligibleForSystem(role);
+    }else{
+      state.members.push({
+        id: slugify(name) || `member-${Date.now()}`,
+        name,
+        role,
+        eligibleTournament: roleEligibleForSystem(role),
+        observation: null,
+        status: 'ATIVO',
+        notes: {},
+        exitDate: null,
+        exitReason: null,
+        exitObservation: null,
+        playerTag,
+        tag: playerTag
+      });
+    }
+    saveState();
+    renderMembersSyncView();
+    render();
+    showToast('Membro integrado ao sistema com sucesso.');
+  }catch(err){
+    console.error('integrateSyncedMember', err);
+    alert('Não foi possível integrar este membro agora.');
+  }
+}
+
+
+
+let warHistoryBootstrapDone = false;
+
+async function bootstrapWarHistoryForArena(force=false){
+  try{
+    if(warHistoryBootstrapDone && !force) return;
+    const firebase = window.TOPBRS_FIREBASE;
+    if(!firebase?.app){
+      setTimeout(() => bootstrapWarHistoryForArena(force), 1200);
+      return;
+    }
+    const month = canonicalMonthKey(state.meta.currentMonth);
+    const before = JSON.stringify(getWarHistoryMirrorRows(month, 1)) + JSON.stringify(getWarHistoryMirrorRows(month, 2)) + JSON.stringify(getWarHistoryMirrorRows(month, 3)) + JSON.stringify(getWarHistoryMirrorRows(month, 4));
+    await rebuildLegacyWarStateFromHistory();
+    const after = JSON.stringify(getWarHistoryMirrorRows(month, 1)) + JSON.stringify(getWarHistoryMirrorRows(month, 2)) + JSON.stringify(getWarHistoryMirrorRows(month, 3)) + JSON.stringify(getWarHistoryMirrorRows(month, 4));
+    if(after === before && !after){
+      setTimeout(() => bootstrapWarHistoryForArena(force), 1200);
+      return;
+    }
+    warHistoryBootstrapDone = true;
+    render();
+  }catch(err){
+    console.warn('bootstrapWarHistoryForArena', err);
+    setTimeout(() => bootstrapWarHistoryForArena(force), 1500);
+  }
+}
+
+
+async function rebuildLegacyWarStateFromHistory(){
+  clearFutureWarHistoryMirror();
+  const current = getRealCurrentWarSelection();
+  const monthOrder = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
+  const currentMonthNum = Number(monthToNumber(current.month) || 0);
+  const currentMonthIndex = currentMonthNum > 0 ? currentMonthNum - 1 : -1;
+  for(const month of Object.keys(state.months || {})){
+    const canonical = canonicalMonthKey(month);
+    if(canonical !== month){
+      state.months[canonical] = state.months[canonical] || state.months[month];
+      delete state.months[month];
+    }
+  }
+  for(const month of monthOrder){
+    if(monthOrder.indexOf(month) > currentMonthIndex){
+      const monthObj = ensureMonth(month);
+      monthObj.weeks = {'1':{},'2':{},'3':{},'4':{}};
+      setWarHistoryMirrorRows(month, 1, []); setWarHistoryMirrorRows(month, 2, []); setWarHistoryMirrorRows(month, 3, []); setWarHistoryMirrorRows(month, 4, []);
+    }
+  }
+  for(const month of monthOrder.slice(0, Math.max(0, currentMonthIndex + 1))){
+    const monthObj = ensureMonth(month);
+    monthObj.weeks = {'1':{},'2':{},'3':{},'4':{}};
+    for(let week=1; week<=4; week++){
+      try{
+        const rows = await fetchWarHistoryRows(month, week);
+        setWarHistoryMirrorRows(month, week, rows);
+        if(Array.isArray(rows) && rows.length){
+          applyWarRowsToState(month, week, rows);
+        }
+      }catch(err){
+        console.warn('rebuildLegacyWarStateFromHistory', month, week, err);
+      }
+    }
+  }
+  saveState();
+  return true;
+}
+
+function render(){
+  const month = canonicalMonthKey(state.meta.currentMonth);
+  const week = Number(state.meta.currentWeek || 1);
+  const ctx = monthContext(month);
+  const goals = state.goals[month] || {attacks:1200,tournament:80};
+
+  if(ui.heroMonth) ui.heroMonth.textContent = monthLabel(month);
+  if(ui.heroClanName) ui.heroClanName.innerHTML = '';
+  if(ui.heroSync) ui.heroSync.textContent = '';
+  updateSyncStatusDisplay('online');
+  requestAnimationFrame(applyDynamicTopSpacing);
+
+  renderKPIs(ctx, goals);
+  renderPodium(ctx);
+  renderGoals(ctx, goals);
+  renderRanking(ctx);
+  renderLeaderActions(ctx);
+  renderAnnualPulse();
+  renderWarBoard(ctx, week);
+  renderWarAutoPeriodControls();
+  renderWarAutoView();
+  renderWarRankingView();
+  renderMembersSyncView();
+  renderApiLogsView();
+  renderHubLeaderView();
+  renderHubRiskView();
+  renderHubDecisionView();
+  renderHubClanView();
+  updateDrawerProfileSummary();
+  renderDecksView();
+  renderTournamentPeriodControls();
+  const tournamentSelection = getTournamentSelection();
+  const tournamentCtx = monthContext(tournamentSelection.month);
+  renderTournamentEditor(tournamentCtx, tournamentSelection.week);
+  renderTournamentBoard(tournamentCtx);
+  renderTournamentPeriodControls();
+  renderClassification();
+  renderEliteBoard(ctx);
+  renderMembers(ctx);
+  renderArchivedBoard(ctx);
+  renderVault(ctx, goals);
+  renderUsersView();
+  const activeViewId = document.querySelector('.view.active')?.id || 'arenaView';
+  document.body.classList.remove('view-arena','view-war-auto','view-tournament');
+  if(activeViewId === 'arenaView') document.body.classList.add('view-arena');
+  if(activeViewId === 'warAutoView') document.body.classList.add('view-war-auto');
+  if(activeViewId === 'tournamentView') document.body.classList.add('view-tournament');
+  document.body.classList.toggle('reader-mode', !canEditApp());
+  const canManage = canEditApp();
+  document.querySelectorAll('[data-view="archivedView"]').forEach(btn => btn.classList.toggle('hidden', !canManage));
+  document.querySelectorAll('#archivedView').forEach(section => section.classList.toggle('hidden', !canManage));
+  if(!canManage && activeViewId === 'archivedView') setActiveView('arenaView');
+  const showWarAuto = true;
+  document.querySelectorAll('[data-view="warAutoView"]').forEach(btn => btn.classList.toggle('hidden', !showWarAuto));
+  document.querySelectorAll('#warAutoView').forEach(section => section.classList.toggle('hidden', !showWarAuto));
+  document.querySelectorAll('[data-view="warRankingView"]').forEach(btn => btn.classList.add('hidden'));
+  document.querySelectorAll('#warRankingView').forEach(section => section.classList.toggle('hidden', !showWarAuto));
+  if(activeViewId === 'warRankingView') setActiveView('classificationView');
+  document.querySelectorAll('[data-view="membersSyncView"]').forEach(btn => btn.classList.toggle('hidden', !isAdminApp()));
+  document.querySelectorAll('#membersSyncView').forEach(section => section.classList.toggle('hidden', !isAdminApp()));
+  document.querySelectorAll('[data-view="apiLogsView"]').forEach(btn => btn.classList.toggle('hidden', !canEditApp()));
+  document.querySelectorAll('#apiLogsView').forEach(section => section.classList.toggle('hidden', !canEditApp()));
+  document.querySelectorAll('[data-view="hubLeaderView"]').forEach(btn => btn.classList.toggle('hidden', !canEditApp()));
+  document.querySelectorAll('[data-view="tournamentView"]').forEach(btn => btn.classList.toggle('hidden', !canEditApp()));
+  document.querySelectorAll('#tournamentView').forEach(section => section.classList.toggle('hidden', !canEditApp()));
+  document.querySelectorAll('[data-view="eliteView"]').forEach(btn => btn.classList.add('hidden'));
+  document.querySelectorAll('#eliteView').forEach(section => section.classList.add('hidden'));
+  ['#hubLeaderView','#hubRiskView','#hubDecisionView','#hubClanView'].forEach(sel => document.querySelectorAll(sel).forEach(section => section.classList.toggle('hidden', !canEditApp())));
+  if((!isAdminApp()) && ['membersSyncView'].includes(activeViewId)) setActiveView('arenaView');
+  if((!canEditApp()) && ['apiLogsView','hubLeaderView','hubRiskView','hubDecisionView','hubClanView','tournamentView'].includes(activeViewId)) setActiveView('arenaView');
+  if(['eliteView'].includes(activeViewId)) setActiveView('classificationView');
+  if(ui.weekHeroPicker){ ui.weekHeroPicker.classList.toggle('hidden', true); }
+  updateSelectors();
+  refreshDrawerMenuCustomization();
+  window.TOPBRS_REMOTE?.afterRender?.();
+}
+
+function updateSelectors(){
+  ui.monthSelect.innerHTML = seedData.meta.months.map(m => `<option value="${m}" ${m===state.meta.currentMonth?'selected':''}>${monthLabel(m)}</option>`).join('');
+  ui.weekSelect.value = String(state.meta.currentWeek || 1);
+  if(ui.monthChipBar){
+    ui.monthChipBar.innerHTML = seedData.meta.months.map(m => {
+      const shortLabel = monthLabel(m).slice(0,3);
+      return `<button class="hero-chip ${m===state.meta.currentMonth?'active':''}" type="button" data-month-chip="${m}">${shortLabel}</button>`;
+    }).join('');
+  }
+  if(ui.weekChipBar){
+    ui.weekChipBar.innerHTML = [1,2,3,4].map(week => `<button class="hero-chip ${week===Number(state.meta.currentWeek||1)?'active':''}" type="button" data-week-chip="${week}">S${week}</button>`).join('');
+  }
+  const localMonthMarkup = seedData.meta.months.map(m => {
+    const shortLabel = monthLabel(m).slice(0,3);
+    const active = m===state.meta.currentMonth ? 'active' : '';
+    return `<button class="hero-chip ${active}" type="button" data-local-month-chip="${m}">${shortLabel}</button>`;
+  }).join('');
+  if(ui.arenaMonthChipBar) ui.arenaMonthChipBar.innerHTML = localMonthMarkup;
+  if(ui.eliteMonthChipBar) ui.eliteMonthChipBar.innerHTML = localMonthMarkup;
+  requestAnimationFrame(() => {
+    centerActiveChipInBar(ui.monthChipBar);
+    centerActiveChipInBar(ui.weekChipBar);
+    centerActiveChipInBar(ui.arenaMonthChipBar);
+    centerActiveChipInBar(ui.eliteMonthChipBar);
+    centerActiveChipInBar(ui.warAutoMonthChipBar);
+    centerActiveChipInBar(ui.warAutoWeekChipBar);
+  });
+  if(ui.classificationMonthSelect){
+    const selectedMonth = state.ui.classificationMonth || state.meta.currentMonth;
+    ui.classificationMonthSelect.innerHTML = seedData.meta.months.map(m => `<option value="${m}" ${m===selectedMonth?'selected':''}>${monthLabel(m)}</option>`).join('');
+  }
+}
+function renderKPIs(ctx, goals){
+  const leader = ctx.summaries[0];
+  const cards = [
+    {label:'Ataques do clã', value:ctx.attackTotalClan, hint:`Meta ${goals.attacks}`, tone: ctx.attackTotalClan >= goals.attacks ? 'success' : ''},
+    {label:'Pontos torneio', value:ctx.tournamentTotalClan, hint:`Meta ${goals.tournament}`, tone: ctx.tournamentTotalClan >= goals.tournament ? 'success' : 'gold'},
+    {label:'Média elite', value:ctx.avgElite, hint:`MVP ${leader ? esc(leader.member.name) : '-'}`, tone:'gold'},
+    {label:'Riscos críticos', value:ctx.riskCount, hint:`${ctx.reviewCount} revisar • ${ctx.expelCount} expulsão`, tone: ctx.riskCount ? 'danger' : 'success'}
+  ];
+  ui.kpiGrid.innerHTML = cards.map(card => `
+    <article class="kpi ${card.tone}">
+      <div class="label">${card.label}</div>
+      <div class="value">${card.value}</div>
+      <div class="hint">${card.hint}</div>
+    </article>
+  `).join('');
+}
+function renderPodium(ctx){
+  const top3 = ctx.summaries.slice(0,3);
+  if(!top3.length){
+    ui.podium.innerHTML = '<div class="empty">Sem dados no mês.</div>';
+    return;
+  }
+  const order = [1,0,2].filter(idx => top3[idx]).map(idx => ({item:top3[idx], slot: idx===0?'first':idx===1?'second':'third'}));
+  ui.podium.innerHTML = `<div class="podium">` + order.map(({item,slot}) => `
+    <article class="podium-card ${slot} ${memberMatchesCurrentUser(item.member) ? 'is-self' : ''}">
+      <div class="podium-rank">${slot==='first'?'🥇':slot==='second'?'🥈':'🥉'}</div>
+      <div class="podium-name">${esc(item.member.name)} ${memberMatchesCurrentUser(item.member) ? '<span class="self-badge">VOCÊ</span>' : ''}</div>
+      <div class="podium-role">${esc(item.member.role)}</div>
+      <div class="podium-score">${item.scoreElite}</div>
+      <div class="chips">
+        <span class="chip blue">${item.attacksMonth} ataques</span>
+        <span class="chip ${item.confidence==='ALTA'?'good':item.confidence==='MÉDIA'?'warn':'bad'}">${item.confidence}</span>
+      </div>
+    </article>
+  `).join('') + `</div>`;
+}
+function renderGoals(ctx, goals){
+  const attackPct = pct(ctx.attackTotalClan, goals.attacks || 0);
+  const tournamentPct = pct(ctx.tournamentTotalClan, goals.tournament || 0);
+  ui.goalPanel.innerHTML = `
+    <div class="goal-grid">
+      <div class="goal-stat">
+        <div class="goal-row"><span>Ataques</span><span>${ctx.attackTotalClan} / ${goals.attacks}</span></div>
+        <div class="progress"><span style="width:${attackPct}%"></span></div>
+        <strong>${attackPct}%</strong>
+      </div>
+      <div class="goal-stat">
+        <div class="goal-row"><span>Torneio</span><span>${ctx.tournamentTotalClan} / ${goals.tournament}</span></div>
+        <div class="progress"><span style="width:${tournamentPct}%"></span></div>
+        <strong>${tournamentPct}%</strong>
+      </div>
+    </div>
+  `;
+}
+function renderRanking(ctx){
+  const items = [...ctx.summaries];
+  items.sort((a,b) => rankMode === 'elite'
+    ? (b.scoreElite - a.scoreElite) || (b.scoreIntegrated - a.scoreIntegrated)
+    : (b.scoreIntegrated - a.scoreIntegrated) || (b.scoreElite - a.scoreElite));
+  const scoreLabel = rankMode === 'elite' ? 'Score ELITE' : 'Score Integrado';
+  const scoreKey = rankMode === 'elite' ? 'scoreElite' : 'scoreIntegrated';
+  const leader = items[0];
+  ui.rankingList.innerHTML = `
+    <div class="classification-wrap football-style tournament-style replicated-ranking-table">
+      ${leader ? `
+      <div class="classification-leader-card tournament-leader-card">
+        <div class="leader-crown">${rankMode === 'elite' ? '👑' : '📊'}</div>
+        <div class="leader-copy">
+          <span class="leader-label">${scoreLabel}</span>
+          <strong>${esc(leader.member.name)} ${memberMatchesCurrentUser(leader.member) ? '<span class="self-badge">VOCÊ</span>' : ''}</strong>
+          <small>${esc(leader.member.role)} • ${leader.attacksMonth} ataques • ${leader.tournamentPoints} torneio</small>
+        </div>
+        <div class="leader-points-box">
+          <span>PTS</span>
+          <strong>${leader[scoreKey]}</strong>
+        </div>
+      </div>` : ''}
+      <div class="classification-table tournament-table-shell">
+        <div class="classification-grid tournament-grid compact-grid ranking-grid-table">
+          <div class="classification-head tournament-head compact-head ranking-head-table">
+            <div>#</div>
+            <div>Membro</div>
+            <div>PTS</div>
+            <div>ATQ</div>
+            <div>TOR</div>
+            <div>CL</div>
+            <div>STS</div>
+          </div>
+          ${items.slice(0,8).map((item,idx) => {
+            const topClass = idx < 5 ? 'top5' : idx < 8 ? 'top10' : '';
+            const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : (idx+1);
+            const tone = item.alert === 'EXPULSÃO' ? 'bad' : item.alert === 'RISCO' ? 'warn' : 'good';
+            return `
+              <div class="classification-row tournament-row compact-row ranking-table-row ${topClass} ${idx===0?'leader-row':''} ${memberMatchesCurrentUser(item.member) ? 'is-self' : ''}">
+                <div class="classification-rank"><span class="classification-badge">${medal}</span></div>
+                <div class="classification-name tournament-name-cell ranking-name-cell">
+                  <strong>${esc(item.member.name)} ${memberMatchesCurrentUser(item.member) ? '<span class="self-badge">VOCÊ</span>' : ''}</strong>
+                  <span>${esc(item.member.role)} • ${scoreLabel}</span>
+                </div>
+                <div class="classification-cell points">${item[scoreKey]}</div>
+                <div class="classification-cell standings-cell">${item.attacksMonth}</div>
+                <div class="classification-cell standings-cell">${item.tournamentPoints}</div>
+                <div class="classification-cell standings-cell">${item.clinchitPoints}</div>
+                <div class="classification-cell standings-cell status"><span class="mini-chip ${tone}">${item.alert}</span></div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+function renderLeaderActions(ctx){
+  if(!ui.leaderActions) return;
+  const actions = [
+    ['🚀 Promover', ctx.summaries.filter(s => s.suggestion === 'PROMOVER')],
+    ['⚔️ Revisar cargo', ctx.summaries.filter(s => s.suggestion === 'REVISAR CARGO')],
+    ['❌ Expulsar', ctx.summaries.filter(s => s.suggestion === 'EXPULSAR')],
+    ['👑 MVP', ctx.summaries.slice(0,1)]
+  ];
+  ui.leaderActions.innerHTML = actions.map(([title, list]) => `
+    <article class="leader-card">
+      <div class="leader-top">
+        <strong>${title}</strong>
+        <span class="chip ${title.includes('Expuls')?'bad':title.includes('Promover')?'good':'warn'}">${list.length}</span>
+      </div>
+      <div class="chips">
+        ${list.length ? list.slice(0,4).map(item => `<span class="chip blue">${esc(item.member.name)}</span>`).join('') : '<span class="mini">Nenhum nome agora.</span>'}
+      </div>
+    </article>
+  `).join('');
+}
+function annualSummary(){
+  const members = activeMembers();
+  const rows = members.map(member => {
+    let attacksYear = 0, tournamentYear = 0, days44Year = 0, perfectWeeks = 0, eliteTotal = 0;
+    for(const month of seedData.meta.months){
+      const summary = monthContext(month).summaries.find(s => s.member.name === member.name);
+      if(summary){
+        attacksYear += summary.attacksMonth;
+        tournamentYear += summary.tournamentPoints;
+        days44Year += summary.days44Month;
+        perfectWeeks += summary.perfectWeeks;
+        eliteTotal += summary.scoreElite;
+      }
+    }
+    return {member, attacksYear, tournamentYear, days44Year, perfectWeeks, eliteTotal: round1(eliteTotal)};
+  }).sort((a,b) => (b.eliteTotal - a.eliteTotal) || (b.attacksYear - a.attacksYear));
+  rows.forEach((row,idx) => row.rank = idx+1);
+  return rows;
+}
+function renderAnnualPulse(){
+  if(!ui.annualPulse) return;
+  const rows = annualSummary().slice(0,5);
+  ui.annualPulse.innerHTML = rows.map(row => `
+    <article class="pulse-card">
+      <div class="pulse-top">
+        <strong>${row.rank}. ${esc(row.member.name)}</strong>
+        <span class="chip ${row.rank===1?'good':'blue'}">${row.eliteTotal} elite ano</span>
+      </div>
+      <div class="chips">
+        <span class="chip">${row.attacksYear} ataques</span>
+        <span class="chip">${row.tournamentYear} torneio</span>
+        <span class="chip">${row.days44Year} dias 4/4</span>
+      </div>
+    </article>
+  `).join('');
+}
+function renderWarBoard(ctx, week){
+  let filtered = filteredSummariesForTools(ctx, 'war').filter(item => {
+    if(warFilter === 'risk') return ['RISCO','EXPULSÃO'].includes(item.alert);
+    if(warFilter === 'safe') return item.alert === 'OK';
+    return true;
+  });
+  const quickbar = renderToolQuickbar('war', filtered.length);
+  if(!filtered.length){
+    ui.warBoard.innerHTML = quickbar + '<div class="empty">Nenhum membro encontrado nesse filtro.</div>';
+    return;
+  }
+  ui.warBoard.innerHTML = quickbar + filtered.map(item => {
+    const weekData = item.weekly[week-1];
+    const collapsed = isCollapsed('war', item.member.name);
+    const memberKey = slugify(item.member.name);
+    return `
+      <article class="war-row ${collapsed?'collapsed':''} ${memberMatchesCurrentUser(item.member) ? 'is-self' : ''}" id="war-${memberKey}" data-member-name="${esc(item.member.name)}" data-member-role="${esc(item.member.role)}">
+        <div class="war-top">
+          <div>
+            <strong>${esc(item.member.name)} ${memberMatchesCurrentUser(item.member) ? '<span class="self-badge">VOCÊ</span>' : ''}</strong>
+            <small>${esc(item.member.role)} • ${weekData.attacksTotal} ataques • ${weekData.days44} dias 4/4</small>
+          </div>
+          <div class="war-stats">
+            <span class="chip ${weekData.clinchit?'good':'warn'}">${weekData.clinchit?'CLINCHIT':'SEM FECHAR'}</span>
+            <span class="chip ${item.alert==='EXPULSÃO'?'bad':item.alert==='RISCO'?'warn':'blue'}">${item.alert}</span>
+            <button class="collapse-toggle" type="button" data-collapse-member="war|${encodeURIComponent(item.member.name)}" aria-expanded="${collapsed?'false':'true'}">${collapsed?'Expandir':'Recolher'}</button>
+          </div>
+        </div>
+        <div class="member-collapsible ${collapsed?'is-collapsed':''}">
+          <div class="day-grid">
+            ${dayOrder.map(day => `
+              <div class="day-card">
+                <div class="day-title">${day}</div>
+                <div class="attack-grid">
+                  ${weekData.days[day].attacks.map((on, idx) => `<button class="attack-btn ${on?'on':'off'}" data-toggle-attack="${encodeURIComponent(item.member.name)}|${week}|${day}|${idx}">${on?'✅':'—'}</button>`).join('')}
+                </div>
+                <div class="chips"><span class="chip ${weekData.days[day].fourFour?'good':'warn'}">${weekData.days[day].total}/4</span></div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function getTournamentSelection(){
+  state.ui ||= {};
+  state.ui.tournamentMonth ||= canonicalMonthKey(state.meta.currentMonth);
+  state.ui.tournamentWeek ||= Number(state.meta.currentWeek || 1);
+  return {
+    month: canonicalMonthKey(state.ui.tournamentMonth),
+    week: Math.max(1, Math.min(4, Number(state.ui.tournamentWeek || 1)))
+  };
+}
+
+function renderTournamentPeriodControls(){
+  const selection = getTournamentSelection();
+  const monthButtons = (seedData.meta.months || []).map((m) => {
+    const shortLabel = monthLabel(m).slice(0,3);
+    return `<button class="hero-chip ${m===selection.month?'active':''}" type="button" data-tournament-month="${esc(m)}">${esc(shortLabel)}</button>`;
+  }).join('');
+  const weekButtons = [1,2,3,4].map((week) => {
+    return `<button class="hero-chip ${week===selection.week?'active':''}" type="button" data-tournament-week="${week}">S${week}</button>`;
+  }).join('');
+
+  if(ui.tournamentMonthChipBar) ui.tournamentMonthChipBar.innerHTML = monthButtons;
+  if(ui.tournamentWeekChipBar) ui.tournamentWeekChipBar.innerHTML = weekButtons;
+  requestAnimationFrame(syncTournamentPeriodChipBars);
+}
+
+
+function centerActiveChipInBar(bar){
+  if(!bar) return;
+  const active = bar.querySelector('.hero-chip.active');
+  if(!active) return;
+  const target = Math.max(0, active.offsetLeft - ((bar.clientWidth - active.offsetWidth) / 2));
+  try{ bar.scrollTo({ left: target, behavior: 'smooth' }); }
+  catch(_){ bar.scrollLeft = target; }
+}
+function syncTournamentPeriodChipBars(){
+  centerActiveChipInBar(ui.tournamentMonthChipBar);
+  centerActiveChipInBar(ui.tournamentWeekChipBar);
+}
+function renderTournamentEditor(ctx, week){
+  if(!canEditApp()){
+    ui.tournamentEditor.innerHTML = '<div class="empty">Torneio semanal disponível apenas para líderes e co-líderes com acesso de edição.</div>';
+    return;
+  }
+  const filtered = filteredSummariesForTools(ctx, 'tournament');
+  const quickbar = renderToolQuickbar('tournament', filtered.length);
+  ui.tournamentEditor.innerHTML = quickbar + filtered.map(item => {
+    const tw = item.tournament.weeks[week-1];
+    const payload = `${encodeURIComponent(item.member.name)}|${week}`;
+    const collapsed = isCollapsed('tournament', item.member.name);
+    const memberKey = slugify(item.member.name);
+    return `
+      <article class="tour-row compact ${collapsed?'collapsed':''}" id="tour-${memberKey}" data-member-name="${esc(item.member.name)}" data-member-role="${esc(item.member.role)}">
+        <div class="tour-main">
+          <div class="tour-identity">
+            <strong>${esc(item.member.name)}</strong>
+            <span class="chip blue">${esc(item.member.role)}</span>
+          </div>
+          <div class="tour-main-actions">
+            <div class="tour-points-inline"><span class="chip ${tw.points>=6?'good':tw.points>0?'blue':'warn'}">${tw.points} pts</span></div>
+            <button class="collapse-toggle" type="button" data-collapse-member="tournament|${encodeURIComponent(item.member.name)}" aria-expanded="${collapsed?'false':'true'}">${collapsed?'Expandir':'Recolher'}</button>
+          </div>
+        </div>
+        <div class="member-collapsible ${collapsed?'is-collapsed':''}">
+          <div class="tour-actions-grid">
+            <button class="toggle ${tw.participated?'on':''}" data-toggle-participation="${payload}">${tw.participated?'Participou':'Participar'}</button>
+            <div class="tour-medals">
+              <button class="mini-medal ${tw.position===1?'active gold':''}" data-quick-position="${payload}" data-position-value="1">🥇</button>
+              <button class="mini-medal ${tw.position===2?'active silver':''}" data-quick-position="${payload}" data-position-value="2">🥈</button>
+              <button class="mini-medal ${tw.position===3?'active bronze':''}" data-quick-position="${payload}" data-position-value="3">🥉</button>
+            </div>
+            <label class="tour-position-field">
+              <span>Posição</span>
+              <input type="number" min="1" max="${activeMembers().length}" value="${tw.position ?? ''}" data-position-input="${payload}" placeholder="#">
+            </label>
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('') + (!filtered.length ? '<div class="empty">Nenhum membro encontrado nesse filtro.</div>' : '');
+}
+function renderTournamentBoard(ctx){
+  if(!ui.tournamentBoard) return;
+  const rows = [...ctx.summaries].sort((a,b) => (b.tournamentPoints - a.tournamentPoints) || (b.scoreElite - a.scoreElite) || a.member.name.localeCompare(b.member.name));
+  const leader = rows[0];
+  ui.tournamentBoard.innerHTML = `
+    <div class="classification-wrap football-style tournament-style">
+      ${leader ? `
+      <div class="classification-leader-card tournament-leader-card">
+        <div class="leader-crown">🏆</div>
+        <div class="leader-copy">
+          <span class="leader-label">Líder do torneio</span>
+          <strong>${esc(leader.member.name)}</strong>
+          <small>${esc(leader.member.role)} • ${leader.tournament.top3Month} top 3 no mês</small>
+        </div>
+        <div class="leader-points-box">
+          <span>PTS</span>
+          <strong>${leader.tournamentPoints}</strong>
+        </div>
+      </div>` : ''}
+      <div class="classification-table tournament-table-shell">
+        <div class="classification-grid tournament-grid compact-grid">
+          <div class="classification-head tournament-head compact-head">
+            <div>#</div>
+            <div>Membro</div>
+            <div>PTS</div>
+            <div>S1</div>
+            <div>S2</div>
+            <div>S3</div>
+            <div>S4</div>
+          </div>
+          ${rows.map((item,idx) => {
+            const topClass = idx < 5 ? 'top5' : idx < 10 ? 'top10' : '';
+            const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : (idx+1);
+            return `
+              <div class="classification-row tournament-row compact-row ${topClass}">
+                <div class="classification-rank"><span class="classification-badge">${medal}</span></div>
+                <div class="classification-name tournament-name-cell">
+                  <strong>${esc(item.member.name)}</strong>
+                  <span>${esc(item.member.role)} • Top 3: ${item.tournament.top3Month}</span>
+                </div>
+                <div class="classification-cell points">${item.tournamentPoints}</div>
+                ${item.tournament.weeks.map(w=>`<div class="classification-cell standings-cell"><span class="week-mini ${w.participated?'played':''}">${w.points}</span></div>`).join('')}
+              </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+function previousMonth(month){
+  const idx = seedData.meta.months.indexOf(month);
+  return idx > 0 ? seedData.meta.months[idx - 1] : null;
+}
+function classificationRows(month){
+  const ctx = monthContext(month);
+  const rows = [...ctx.summaries].sort((a,b) =>
+    (b.classificationPoints - a.classificationPoints) ||
+    (b.attacksMonth - a.attacksMonth) ||
+    (b.tournamentPoints - a.tournamentPoints) ||
+    (b.perfectWeeks - a.perfectWeeks) ||
+    a.member.name.localeCompare(b.member.name)
+  );
+  rows.forEach((item, idx) => {
+    item.classificationRank = idx + 1;
+  });
+  return rows;
+}
+function movementMeta(month, name, currentRank){
+  const prevMonth = previousMonth(month);
+  if(!prevMonth) return {icon:'—', cls:'flat', label:'Sem mês anterior'};
+  const prevRows = classificationRows(prevMonth);
+  const prevRank = prevRows.findIndex(item => item.member.name === name);
+  if(prevRank === -1) return {icon:'★', cls:'new', label:'Novo na tabela'};
+  const delta = (prevRank + 1) - currentRank;
+  if(delta > 0) return {icon:'↑', cls:'up', label:`Subiu ${delta}`};
+  if(delta < 0) return {icon:'↓', cls:'down', label:`Caiu ${Math.abs(delta)}`};
+  return {icon:'→', cls:'flat', label:'Sem mudança'};
+}
+
+
+
+async function getClassificationDataset(mode='geral', month=state.meta.currentMonth, week=1){
+  if(mode === 'guerras'){
+    const prevMonth = state.ui?.warRankingMonth;
+    const prevWeek = state.ui?.warRankingWeek;
+    state.ui ||= {};
+    state.ui.warRankingMonth = month;
+    state.ui.warRankingWeek = week;
+    let rows = [];
+    try{
+      rows = await getEligibleWarRankingRows(false);
+    }catch(err){
+      console.warn('getClassificationDataset guerras', err);
+      rows = [];
+    }
+    state.ui.warRankingMonth = prevMonth;
+    state.ui.warRankingWeek = prevWeek;
+    return rows.map((row, index) => {
+      const member = row.linkedMember || findActiveMemberLink(row) || {name: row.name || 'Sem nome', role: row.role || 'Membro'};
+      return {
+        member,
+        rank: index + 1,
+        points: Number(row.points || 0),
+        subline: `${Number(row.total || 0)} ataques`
+      };
+    });
+  }
+  if(mode === 'torneio'){
+    const ctx = monthContext(month);
+    const rows = [...ctx.summaries].sort((a,b) =>
+      (b.tournamentPoints - a.tournamentPoints) ||
+      (b.scoreElite - a.scoreElite) ||
+      a.member.name.localeCompare(b.member.name, 'pt-BR')
+    );
+    return rows.map((item, index) => ({
+      member: item.member,
+      rank: index + 1,
+      points: Number(item.tournamentPoints || 0),
+      subline: `${item.member.role} • Top 3: ${Number(item.tournament?.top3Month || 0)}`,
+      extraColumns: [
+        Number(item.tournament?.weeks?.[0]?.points || 0),
+        Number(item.tournament?.weeks?.[1]?.points || 0),
+        Number(item.tournament?.weeks?.[2]?.points || 0),
+        Number(item.tournament?.weeks?.[3]?.points || 0)
+      ]
+    }));
+  }
+  if(mode === 'elite'){
+    const ctx = monthContext(month);
+    const rows = [...ctx.summaries].sort((a,b) =>
+      (b.scoreElite - a.scoreElite) ||
+      (b.confidence === 'ALTA' ? 1 : b.confidence === 'MÉDIA' ? 0 : -1) - (a.confidence === 'ALTA' ? 1 : a.confidence === 'MÉDIA' ? 0 : -1) ||
+      a.member.name.localeCompare(b.member.name, 'pt-BR')
+    );
+    const cfShort = value => value === 'ALTA' ? 'A' : value === 'MÉDIA' ? 'M' : 'B';
+    return rows.map((item, index) => ({
+      member: item.member,
+      rank: index + 1,
+      points: Number(item.scoreElite || 0),
+      subline: `${item.member.role} • ${item.suggestion}`,
+      extraColumns: [
+        cfShort(item.confidence)
+      ]
+    }));
+  }
+  if(mode === 'doacoes'){
+    let clan = null;
+    try{
+      clan = await fetchClashClanProfile(window.TOPBRS_FIREBASE_CONFIG?.clashClanTag || '#QRG9QQ', { force:false });
+    }catch(err){
+      console.warn('getClassificationDataset doacoes', err);
+      clan = null;
+    }
+    const members = Array.isArray(clan?.memberList) ? clan.memberList : [];
+    const active = activeMembers();
+    const byTag = new Map(active.map(m => [normalizePlayerTag(m.playerTag || m.tag || ''), m]));
+    const byName = new Map(active.map(m => [normalizeMatchText(m.name || ''), m]));
+    const rows = members.map(raw => {
+      const linked = byTag.get(normalizePlayerTag(raw.tag || '')) || byName.get(normalizeMatchText(raw.name || '')) || null;
+      const member = linked || {name: raw.name || 'Sem nome', role: raw.role === 'leader' ? 'Líder' : raw.role === 'coLeader' ? 'Co-líder' : raw.role === 'elder' ? 'Ancião' : 'Membro', playerTag: raw.tag || ''};
+      return {
+        member,
+        points: Number(raw.donations || 0),
+        received: Number(raw.donationsReceived || 0)
+      };
+    }).filter(item => roleEligibleForSystem(item.member.role || ''));
+    rows.sort((a,b) => (b.points - a.points) || (a.received - b.received) || String(a.member.name||'').localeCompare(String(b.member.name||''), 'pt-BR'));
+    return rows.map((item, index) => ({
+      member: item.member,
+      rank: index + 1,
+      points: item.points,
+      subline: `${item.received} recebidas`
+    }));
+  }
+  const rows = classificationRows(month);
+  return rows.map(item => ({
+    member: item.member,
+    rank: item.classificationRank,
+    points: Number(item.classificationPoints || 0),
+    subline: `${item.member.role} • ${item.attacksMonth} ataques`
+  }));
+}
+
+
+function openClassificationDetail(key){
+  const payload = classificationDetailLookup.get(String(key || ''));
+  if(!payload || !ui.classificationDetailModal || !ui.classificationDetailBody) return;
+  const memberName = esc(payload.member?.name || 'Sem nome');
+  const role = esc(payload.member?.role || 'Membro');
+  if(payload.mode === 'torneio'){
+    const weeks = Array.isArray(payload.weeks) ? payload.weeks : [0,0,0,0];
+    ui.classificationDetailBody.innerHTML = `
+      <div class="classification-detail-shell tournament glass-popup-content">
+        <p class="eyebrow">Torneio</p>
+        <h3>${memberName}</h3>
+        <p class="classification-detail-sub">${role} • Pontuação semanal do mês vigente</p>
+        <div class="classification-detail-total">
+          <span>Total do mês</span>
+          <strong>${Number(payload.points || 0).toLocaleString('pt-BR')} PTS</strong>
+        </div>
+        <div class="classification-detail-grid">
+          ${weeks.map((value, index) => `<article class="classification-detail-card"><small>S${index+1}</small><strong>${Number(value || 0).toLocaleString('pt-BR')}</strong></article>`).join('')}
+        </div>
+      </div>`;
+  } else {
+    ui.classificationDetailBody.innerHTML = `
+      <div class="classification-detail-shell elite glass-popup-content">
+        <p class="eyebrow">Elite</p>
+        <h3>${memberName}</h3>
+        <p class="classification-detail-sub">${role} • Detalhe complementar do mês vigente</p>
+        <div class="classification-detail-grid single-metric">
+          <article class="classification-detail-card accent"><small>Elite</small><strong>${Number(payload.points || 0).toLocaleString('pt-BR')}</strong></article>
+          <article class="classification-detail-card"><small>CF</small><strong>${esc(String(payload.cf || '—'))}</strong></article>
+        </div>
+        <div class="classification-detail-note">${esc(String(payload.subline || ''))}</div>
+      </div>`;
+  }
+  ui.classificationDetailModal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+function closeClassificationDetail(){
+  ui.classificationDetailModal?.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+async function renderClassification(){
+  const month = state.ui.classificationMonth || state.meta.currentMonth;
+  const mode = state.ui.classificationMode || 'geral';
+  const week = [1,2,3,4].includes(Number(state.ui.classificationWeek)) ? Number(state.ui.classificationWeek) : (state.meta.currentWeek || 1);
+  const query = (state.ui.classificationQuery || '').trim().toLowerCase();
+  const roleFilter = state.ui.classificationRole || 'ALL';
+  const monthMap = {'JANEIRO':0,'FEVEREIRO':1,'MARÇO':2,'ABRIL':3,'MAIO':4,'JUNHO':5,'JULHO':6,'AGOSTO':7,'SETEMBRO':8,'OUTUBRO':9,'NOVEMBRO':10,'DEZEMBRO':11};
+  const now = new Date();
+  const targetMonthIndex = monthMap[String(month).toUpperCase()] ?? now.getMonth();
+  const year = now.getFullYear();
+  const endDate = new Date(year, targetMonthIndex + 1, 0, 23, 59, 59);
+  const diffMs = Math.max(0, endDate - now);
+  const diffDays = Math.floor(diffMs / 86400000);
+  const diffHours = Math.floor((diffMs % 86400000) / 3600000);
+  const diffMins = Math.floor((diffMs % 3600000) / 60000);
+  const timeRemaining = `${diffDays}d ${String(diffHours).padStart(2,'0')}h ${String(diffMins).padStart(2,'0')}m`;
+  if(!ui.classificationBoard) return;
+  ui.classificationBoard.innerHTML = '<div class="empty">Montando classificação...</div>';
+
+  const sourceRows = await getClassificationDataset(mode, month, week);
+  const filteredRows = sourceRows.filter(item => {
+    const roleOk = roleFilter === 'ALL' ? true : item.member.role === roleFilter;
+    const searchOk = !query ? true : String(item.member.name || '').toLowerCase().includes(query);
+    return roleOk && searchOk;
+  });
+  const rows = filteredRows.map((item, idx) => ({ ...item, rank: idx + 1 }));
+  classificationDetailLookup = new Map();
+  rows.forEach(item => {
+    if(mode === 'torneio'){
+      classificationDetailLookup.set(`${mode}|${item.rank}|${item.member?.name || ''}`, { mode, member:item.member, points:item.points, subline:item.subline, weeks:Array.isArray(item.extraColumns) ? item.extraColumns : [0,0,0,0] });
+    } else if(mode === 'elite'){
+      classificationDetailLookup.set(`${mode}|${item.rank}|${item.member?.name || ''}`, { mode, member:item.member, points:item.points, subline:item.subline, cf:Array.isArray(item.extraColumns) ? item.extraColumns[0] : '—' });
+    }
+  });
+  const top3 = rows.slice(0,3);
+  const restRows = rows.slice(3);
+
+  const currentMember = resolveCurrentLinkedMember();
+  const currentTag = normalizePlayerTag(currentMember?.playerTag || currentMember?.tag || '');
+  let selfRow = null;
+  if(currentTag){ selfRow = rows.find(item => normalizePlayerTag(item.member?.playerTag || item.member?.tag || '') === currentTag) || null; }
+  if(!selfRow && currentMember?.name){ selfRow = rows.find(item => String(item.member?.name || '').toLowerCase() === String(currentMember.name).toLowerCase()) || null; }
+
+  const seasonStrong = mode === 'guerras' ? `S${week} • ${monthLabel(month)}` : monthLabel(month);
+  const unitLabel = mode === 'doacoes' ? '' : mode === 'elite' ? '' : 'PTS';
+  const scoreLabel = mode === 'doacoes' ? 'Doações' : mode === 'torneio' ? 'Pontos' : mode === 'elite' ? 'Elite' : 'Pontos';
+  const selfShouldFloat = !!(selfRow && Number(selfRow.rank || 0) > 3);
+  const monthButtons = seedData.meta.months.map(item => {
+    const shortLabel = monthLabel(item).slice(0,3);
+    return `<button type="button" class="class-switch-chip month compact ${item===month ? 'active' : ''}" data-classification-month="${esc(item)}">${esc(shortLabel)}</button>`;
+  }).join('');
+  const weekButtons = `${[1,2,3,4].map(w => `<button type="button" class="class-switch-chip compact ${w===week ? 'active' : ''}" data-classification-week="${w}">S${w}</button>`).join('')}`;
+  const detailEnabled = mode === 'torneio' || mode === 'elite';
+
+  const topCard = (row, slot) => {
+    const tone = slot === 1 ? 'gold' : slot === 2 ? 'silver' : 'bronze';
+    const icon = slot === 1 ? '👑' : slot === 2 ? '🥈' : '🥉';
+    const isSelf = memberMatchesCurrentUser(row.member);
+    const detailKey = `${mode}|${row.rank}|${row.member?.name || ''}`;
+    const pointsHtml = unitLabel ? `${Number(row.points || 0).toLocaleString('pt-BR')} <span>${unitLabel}</span>` : `${Number(row.points || 0).toLocaleString('pt-BR')}`;
+    return `<article class="class-top-card ${tone} slot-${slot} ${isSelf ? 'is-self' : ''} ${detailEnabled ? 'is-clickable' : ''}" ${detailEnabled ? `data-classification-detail="${esc(detailKey)}"` : ''}>
+      <div class="class-top-rank-badge">${slot}</div>
+      ${slot === 1 ? '<div class="class-top-crown">👑</div>' : ''}
+      <div class="class-top-emblem ${slot === 1 ? 'crown' : ''}">${icon}</div>
+      <strong>${esc(row.member.name || 'Sem nome')} ${isSelf ? '<span class="self-badge">VOCÊ</span>' : ''}</strong>
+      <small>${esc(mode === 'geral' ? row.member.role : row.subline)}</small>
+      <div class="class-top-points">${pointsHtml}</div>
+    </article>`;
+  };
+
+  ui.classificationBoard.innerHTML = `
+    <div class="classification-wrap class-v271-shell classification-mode-shell classification-mode-${mode}">
+      <div class="classification-hero-card class-v271-hero">
+        <div class="classification-hero-copy">
+          <span class="classification-kicker">Classificação</span>
+          <strong>Ranking do Clã</strong>
+          <small>Temporada atual • ${monthLabel(month)}</small>
+        </div>
+        <div class="classification-season-card class-v271-season">
+          <div class="classification-season-icon">🏆</div>
+          <div class="classification-season-copy">
+            <strong>${seasonStrong}</strong>
+            <small>A temporada termina em</small>
+            <b>${timeRemaining}</b>
+          </div>
+        </div>
+      </div>
+
+      <div class="classification-month-strip premium class-switch-strip compact-months">${monthButtons}</div>
+      ${mode === 'guerras' ? `<div class="classification-week-strip premium class-switch-strip compact-weeks">${weekButtons}</div>` : ''}
+
+      <div class="classification-mode-tabs class-v271-tabs">
+        <button type="button" class="classification-mode-tab ${mode==='geral' ? 'active' : ''}" data-classification-mode="geral">Geral</button>
+        <button type="button" class="classification-mode-tab ${mode==='guerras' ? 'active' : ''}" data-classification-mode="guerras">Guerra</button>
+        <button type="button" class="classification-mode-tab ${mode==='torneio' ? 'active' : ''}" data-classification-mode="torneio">Torneio</button>
+        <button type="button" class="classification-mode-tab ${mode==='elite' ? 'active' : ''}" data-classification-mode="elite">Elite</button>
+        <button type="button" class="classification-mode-tab ${mode==='doacoes' ? 'active' : ''}" data-classification-mode="doacoes">Doações</button>
+      </div>
+
+      ${top3.length ? `<div class="class-top3-grid">${top3[1] ? topCard(top3[1], 2) : ''}${top3[0] ? topCard(top3[0], 1) : ''}${top3[2] ? topCard(top3[2], 3) : ''}</div>` : ''}
+
+      <div class="classification-table class-v271-table">
+        <div class="classification-grid class-v271-grid">
+          <div class="classification-head class-v271-head">
+            <div>Posição</div>
+            <div>Membro</div>
+            <div>${scoreLabel}</div>
+          </div>
+          ${restRows.length ? restRows.map(item => {
+            const detailKey = `${mode}|${item.rank}|${item.member?.name || ''}`;
+            return `<div class="classification-row class-v271-row ${memberMatchesCurrentUser(item.member) ? 'is-self' : ''} ${detailEnabled ? 'is-clickable' : ''}" data-class-rank-row="${item.rank}" ${detailEnabled ? `data-classification-detail="${esc(detailKey)}"` : ''}>
+              <div class="classification-rank class-v271-rank"><span class="classification-badge class-v271-badge">${item.rank}</span></div>
+              <div class="classification-name class-v271-name">
+                <strong>${esc(item.member.name || 'Sem nome')} ${memberMatchesCurrentUser(item.member) ? '<span class="self-badge">VOCÊ</span>' : ''}</strong>
+                <span>${esc(item.subline || item.member.role || '—')}</span>
+              </div>
+              <div class="classification-cell class-v271-score">${Number(item.points || 0).toLocaleString('pt-BR')}${unitLabel ? ` <small>${unitLabel}</small>` : ''}</div>
+            </div>`;
+          }).join('') : `<div class="empty classification-empty">Nenhum membro encontrado com esse filtro.</div>`}
+        </div>
+      </div>
+
+      ${selfShouldFloat ? `<button type="button" class="floating-self-chip" data-jump-self-rank="${selfRow.rank}">Ver sua posição • #${selfRow.rank}</button>` : ''}
+    </div>
+  `;
+}
+
+
+function renderEliteBoard(ctx){
+  const rows = [...ctx.summaries].sort((a,b)=>(b.scoreElite-a.scoreElite) || (b.classificationPoints-a.classificationPoints) || a.member.name.localeCompare(b.member.name));
+  const leader = rows[0];
+  ui.eliteBoard.innerHTML = `
+    <div class="classification-wrap football-style tournament-style elite-selection-table">
+      ${leader ? `
+      <div class="classification-leader-card tournament-leader-card">
+        <div class="leader-crown">👑</div>
+        <div class="leader-copy">
+          <span class="leader-label">Seleção elite</span>
+          <strong>${esc(leader.member.name)}</strong>
+          <small>${esc(leader.member.role)} • confiança ${leader.confidence} • ${leader.warPriority}</small>
+        </div>
+        <div class="leader-points-box">
+          <span>ELT</span>
+          <strong>${leader.scoreElite}</strong>
+        </div>
+      </div>` : ''}
+      <div class="classification-table tournament-table-shell">
+        <div class="classification-grid tournament-grid compact-grid elite-grid-table">
+          <div class="classification-head tournament-head compact-head elite-head-table">
+            <div>#</div>
+            <div>Membro</div>
+            <div>ELT</div>
+            <div>ATQ</div>
+            <div>TOR</div>
+            <div>PRI</div>
+            <div>CF</div>
+          </div>
+          ${rows.slice(0,12).map((item,idx) => {
+            const topClass = idx < 5 ? 'top5' : idx < 10 ? 'top10' : '';
+            const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : (idx+1);
+            return `
+              <div class="classification-row tournament-row compact-row elite-table-row ${topClass} ${idx===0?'leader-row':''}">
+                <div class="classification-rank"><span class="classification-badge">${medal}</span></div>
+                <div class="classification-name tournament-name-cell ranking-name-cell">
+                  <strong>${esc(item.member.name)}</strong>
+                  <span>${esc(item.member.role)} • ${item.suggestion}</span>
+                </div>
+                <div class="classification-cell points">${item.scoreElite}</div>
+                <div class="classification-cell standings-cell">${item.attacksMonth}</div>
+                <div class="classification-cell standings-cell">${item.tournamentPoints}</div>
+                <div class="classification-cell standings-cell"><span class="mini-chip ${item.warPriority==='CRÍTICA'?'bad':item.warPriority==='ALTA'?'warn':'good'}">${item.warPriority.slice(0,3)}</span></div>
+                <div class="classification-cell standings-cell"><span class="mini-chip ${item.confidence==='ALTA'?'good':item.confidence==='MÉDIA'?'warn':'bad'}">${item.confidence.slice(0,1)}</span></div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+function renderHistory(ctx){
+  const month = state.meta.currentMonth;
+  const history = state.history.filter(item => normalizeMonth(item.month) === month).slice(0,12);
+  const rows = history.length ? history : ctx.summaries.slice(0,12).map(item => ({
+    name:item.member.name, month:monthLabel(month), suggestion:item.suggestion, confidence:item.confidence, priority:item.warPriority, alert:item.alert, observation:item.progressStatus
+  }));
+  ui.historyBoard.innerHTML = rows.map(item => `
+    <article class="history-card">
+      <strong>${esc(item.name)}</strong>
+      <div class="chips">
+        <span class="chip blue">${esc(item.suggestion || '-')}</span>
+        <span class="chip ${item.confidence==='ALTA'?'good':item.confidence==='MÉDIA'?'warn':'bad'}">${esc(item.confidence || '—')}</span>
+      </div>
+      <small>${esc(item.observation || '')}</small>
+    </article>
+  `).join('');
+}
+function normalizeMonth(label){
+  if(!label) return '';
+  const cleaned = label.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  return Object.keys(monthLabels).find(key => key.normalize('NFD').replace(/[\u0300-\u036f]/g,'') === cleaned) || cleaned;
+}
+function memberRoleFilterKey(role=''){
+  const normalized = String(role || 'Membro').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase();
+  if(normalized.includes('CO') && normalized.includes('LIDER')) return 'CO-LIDER';
+  if(normalized.includes('LIDER')) return 'LIDER';
+  if(normalized.includes('ANCIAO')) return 'ANCIAO';
+  return 'MEMBRO';
+}
+function getMemberVisualStatus(member, summary){
+  if(member.status === 'ARQUIVADO') return { key:'risk', label:'Risco', tone:'bad', glow:'is-risk' };
+  if(summary?.alert === 'EXPULSÃO' || summary?.alert === 'RISCO') return { key:'risk', label:'Risco', tone:'bad', glow:'is-risk' };
+  if(summary?.alert === 'OBSERVAÇÃO' || summary?.progressStatus === 'ABAIXO DO RITMO') return { key:'attention', label:'Atenção', tone:'warn', glow:'is-attention' };
+  return { key:'active', label:'Em dia', tone:'good', glow:'is-active' };
+}
+function renderMembersPremiumControls(cards){
+  if(ui.membersSearchInput && ui.membersSearchInput.value !== String(state.ui.membersSearch || '')) ui.membersSearchInput.value = String(state.ui.membersSearch || '');
+  if(ui.membersSortSelect && ui.membersSortSelect.value !== String(state.ui.membersSort || 'points')) ui.membersSortSelect.value = String(state.ui.membersSort || 'points');
+
+  if(ui.membersPremiumStats){
+    const active = cards.filter(item => item.visualStatus.key === 'active').length;
+    const attention = cards.filter(item => item.visualStatus.key === 'attention').length;
+    const risk = cards.filter(item => item.visualStatus.key === 'risk').length;
+    ui.membersPremiumStats.innerHTML = `
+      <article class="members-premium-stat glass"><small>Total membros</small><strong>${cards.length}</strong><span>Elenco ativo exibido</span></article>
+      <article class="members-premium-stat glass"><small>Em dia</small><strong>${active}</strong><span>Ritmo saudável</span></article>
+      <article class="members-premium-stat glass"><small>Atenção</small><strong>${attention}</strong><span>Precisam acompanhamento</span></article>
+      <article class="members-premium-stat glass"><small>Em risco</small><strong>${risk}</strong><span>Cobrança imediata</span></article>`;
+  }
+
+  const roleOptions = [['ALL','Todos'],['LIDER','Líder'],['CO-LIDER','Co-líder'],['ANCIAO','Ancião'],['MEMBRO','Membro']];
+  if(ui.membersRoleFilters){
+    ui.membersRoleFilters.innerHTML = roleOptions.map(([value,label]) => `<button type="button" class="members-filter-chip ${String(state.ui.membersRoleFilter || 'ALL') === value ? 'active' : ''}" data-members-role="${value}">${label}</button>`).join('');
+  }
+  const statusOptions = [['ALL','Todos'],['active','Em dia'],['attention','Atenção'],['risk','Risco']];
+  if(ui.membersStatusFilters){
+    ui.membersStatusFilters.innerHTML = statusOptions.map(([value,label]) => `<button type="button" class="members-filter-chip ${String(state.ui.membersStatusFilter || 'ALL') === value ? 'active' : ''}" data-members-status="${value}">${label}</button>`).join('');
+  }
+}
+
+function memberActionLabel(member, summary){
+  if(member.status === 'ARQUIVADO') return 'Arquivado 📦';
+  if(summary?.suggestion === 'PROMOVER') return 'Promover 🎉';
+  if(summary?.suggestion === 'REVISAR CARGO') return 'Rebaixar ❌';
+  return 'Manter ✋🏼';
+}
+
+function renderMembers(ctx){
+  const summaries = Object.fromEntries(ctx.summaries.map(s => [s.member.name, s]));
+  const cards = activeMembers().map(member => {
+    const summary = summaries[member.name] || null;
+    const elite = summary ? Number(summary.scoreElite || 0) : 0;
+    const visualStatus = getMemberVisualStatus(member, summary);
+    return {
+      member,
+      summary,
+      elite,
+      roleKey: memberRoleFilterKey(member.role),
+      visualStatus,
+      attacks: Number(summary?.attacksMonth || 0),
+      points: Number(summary?.classificationPoints || 0),
+      riskWeight: visualStatus.key === 'risk' ? 3 : visualStatus.key === 'attention' ? 2 : 1,
+      isTopWeek: summary ? summary.rankElite === 1 : false
+    };
+  });
+
+  renderMembersPremiumControls(cards);
+
+  const search = String(state.ui.membersSearch || '').trim().toLowerCase();
+  const roleFilter = String(state.ui.membersRoleFilter || 'ALL');
+  const statusFilter = String(state.ui.membersStatusFilter || 'ALL');
+  const sortMode = String(state.ui.membersSort || 'points');
+
+  let visible = cards.filter(item => {
+    const names = [item.member.name, item.member.nick, item.member.fullName, item.member.playerTag, item.member.tag].map(v => String(v || '').toLowerCase());
+    const matchesSearch = !search || names.some(v => v.includes(search));
+    const matchesRole = roleFilter === 'ALL' || item.roleKey === roleFilter;
+    const matchesStatus = statusFilter === 'ALL' || item.visualStatus.key === statusFilter;
+    return matchesSearch && matchesRole && matchesStatus;
+  });
+
+  visible.sort((a,b) => {
+    if(sortMode === 'attacks') return (b.attacks - a.attacks) || (b.points - a.points) || a.member.name.localeCompare(b.member.name, 'pt-BR');
+    if(sortMode === 'risk') return (b.riskWeight - a.riskWeight) || (b.points - a.points) || a.member.name.localeCompare(b.member.name, 'pt-BR');
+    if(sortMode === 'name') return a.member.name.localeCompare(b.member.name, 'pt-BR');
+    return (b.points - a.points) || (b.elite - a.elite) || (b.attacks - a.attacks) || a.member.name.localeCompare(b.member.name, 'pt-BR');
+  });
+
+  if(!visible.length){
+    ui.membersGrid.innerHTML = '<div class="empty members-empty-state">Nenhum membro encontrado com os filtros atuais.</div>';
+    return;
+  }
+
+  ui.membersGrid.innerHTML = visible.map(item => {
+    const { member, summary, elite, visualStatus } = item;
+    const role = member.role || 'Membro';
+    const topBadge = item.isTopWeek ? '<span class="member-top-badge">Top semana</span>' : '';
+    const initials = String(member.name || '?').split(' ').filter(Boolean).slice(0,2).map(part => part[0]).join('').toUpperCase();
+    const isCollapsed = state.ui.membersCollapsed?.[member.name] !== false;
+    return `
+      <article class="member-card member-premium-card ${memberMatchesCurrentUser(member) ? 'is-self' : ''} ${visualStatus.glow} ${isCollapsed ? 'is-collapsed' : 'is-expanded'}">
+        <button class="ghost small icon member-collapse-toggle" type="button" data-member-collapse="${esc(member.name)}" aria-expanded="${!isCollapsed}" aria-label="${isCollapsed ? 'Expandir' : 'Recolher'} ${esc(member.name)}">
+          <span class="member-chevron ${isCollapsed ? '' : 'is-open'}">⌄</span>
+        </button>
+        <div class="member-premium-avatar">${esc(initials)}</div>
+        <div class="member-premium-main">
+          <div class="member-top member-top-collapsible">
+            <div class="member-premium-copy">
+              <strong class="member-name-with-status one-line">${esc(member.name)} ${memberMatchesCurrentUser(member) ? '<span class="self-badge">VOCÊ</span>' : ''}</strong>
+              <div class="member-role-line">
+                <span class="member-role-badge">${esc(role)}</span>
+                <span class="member-presence status-${visualStatus.key}"><span class="status-dot ${getPresenceToneForMember(member)}"></span>${visualStatus.label}</span>
+                ${topBadge}
+              </div>
+            </div>
+            <div class="member-top-right">
+              <span class="chip ${visualStatus.tone}">${summary?.suggestion || 'Sem mês ativo'}</span>
+            </div>
+          </div>
+          <div class="member-premium-expandable ${isCollapsed ? 'hidden' : ''}">
+            <div class="member-premium-stats-row">
+              <div class="member-mini-stat"><span>Ataques</span><strong>${item.attacks}</strong></div>
+              <div class="member-mini-stat"><span>Pontos</span><strong>${item.points}</strong></div>
+              <div class="member-mini-stat"><span>Elite</span><strong>${elite || 0}</strong></div>
+            </div>
+            <div class="member-premium-actions">
+              <button class="ghost small" type="button" data-open-member="${esc(member.name)}">Perfil</button>
+              ${isAdminApp() ? `<button class="ghost small" type="button" data-open-member-action="${esc(member.name)}">Ação</button>` : ''}
+              ${isAdminApp() ? `<button class="ghost small ${visualStatus.key === 'risk' ? 'danger' : ''}" type="button" data-toggle-archive="${esc(member.name)}">${member.status === 'ARQUIVADO' ? 'Reativar' : 'Arquivar'}</button>` : ''}
+            </div>
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+
+function renderArchivedBoard(ctx){
+  if(!ui.archivedBoard) return;
+  if(!canEditApp()){ ui.archivedBoard.innerHTML = '<div class="empty">Arquivados visível apenas para líder ou editor.</div>'; return; }
+  const archived = state.members.filter(member => member.status === 'ARQUIVADO');
+  if(!archived.length){
+    ui.archivedBoard.innerHTML = '<div class="empty">Nenhum membro arquivado no momento.</div>';
+    return;
+  }
+  ui.archivedBoard.innerHTML = `
+    <div class="archived-list">
+      ${archived.map(member => {
+        const history = state.history.filter(item => item.name === member.name).slice(-1)[0];
+        return `
+          <article class="archived-item-card">
+            <button class="archived-item archived-open" type="button" data-open-member="${esc(member.name)}">
+              <span class="archived-main">
+                <strong class="hub-member-name one-line">${esc(member.name)} - ${esc(member.role)}</strong>
+                <small>${member.exitDate ? 'Arquivado em ' + esc(member.exitDate) : 'Arquivado'}${history?.suggestion ? ' • ' + esc(history.suggestion) : ''}</small>
+              </span>
+              <span class="chip bad">Arquivado</span>
+            </button>
+            <div class="inline-actions archived-actions">
+              <button class="ghost small" type="button" data-restore-member="${esc(member.name)}">Restaurar</button>
+              <button class="ghost small danger" type="button" data-delete-member="${esc(member.name)}">Excluir</button>
+            </div>
+          </article>
+        `;
+      }).join('')}
+    </div>`;
+}
+
+function purgeMemberFromState(name){
+  if(!name) return;
+  state.members = state.members.filter(member => member.name !== name);
+  state.history = (state.history || []).filter(item => item.name !== name);
+  if(state.decisions?.currentMonth){
+    state.decisions.currentMonth = state.decisions.currentMonth.filter(item => item.name !== name && item.member?.name !== name);
+  }
+  Object.keys(state.months || {}).forEach(month => {
+    const monthObj = state.months[month];
+    if(!monthObj) return;
+    Object.keys(monthObj.weeks || {}).forEach(week => {
+      if(monthObj.weeks[week] && monthObj.weeks[week][name]) delete monthObj.weeks[week][name];
+    });
+    if(monthObj.tournament && monthObj.tournament[name]) delete monthObj.tournament[name];
+  });
+}
+
+function deleteArchivedMember(name){
+  if(!isAdminApp()) return;
+  if(!name) return;
+  const member = state.members.find(m => m.name === name);
+  if(!member) return;
+  if(!confirm(`Excluir ${name} definitivamente do sistema?`)) return;
+  purgeMemberFromState(name);
+  saveState();
+  closeMember();
+  render();
+}
+function openMemberAction(name){
+  if(!isAdminApp()) return;
+  if(!ui.memberActionModal || !ui.memberActionBody) return;
+  const member = state.members.find(m => m.name === name);
+  if(!member) return;
+  ui.memberActionBody.innerHTML = `
+    <div class="profile-popover-header user-edit-header">
+      <strong class="member-name-with-status">${esc(member.name)} ${memberMatchesCurrentUser(member) ? '<span class="self-badge">VOCÊ</span>' : ''}<span class="status-dot ${getPresenceToneForMember(member)}"></span></strong>
+      <small>${esc(member.role)} • ${esc(member.status)}</small>
+    </div>
+    <div class="member-action-stack">
+      <button class="primary" type="button" data-member-action-choice="keep" data-member-action-name="${esc(member.name)}">Manter ✋🏼</button>
+      <button class="ghost" type="button" data-member-action-choice="promote" data-member-action-name="${esc(member.name)}" ${canEditApp() ? '' : 'disabled'}>Promover 🎉</button>
+      <button class="ghost" type="button" data-member-action-choice="demote" data-member-action-name="${esc(member.name)}" ${canEditApp() ? '' : 'disabled'}>Rebaixar 😡</button>
+    </div>
+    <p class="helper">Promoção e rebaixamento seguem automaticamente a hierarquia do clã.</p>
+  `;
+  ui.memberActionModal.classList.remove('hidden');
+}
+function closeMemberAction(){ ui.memberActionModal?.classList.add('hidden'); }
+function applyMemberAction(action, name){
+  if(!isAdminApp() && action !== 'keep') return;
+  const member = state.members.find(m => m.name === name);
+  if(!member) return;
+  if(action === 'promote') member.role = nextPromotedRole(member.role);
+  if(action === 'demote') member.role = nextDemotedRole(member.role);
+  saveState();
+  closeMemberAction();
+  render();
+}
+
+function renderUsersView(){
+  if(!ui.usersBoard) return;
+  const users = Array.isArray(state.authUsers) ? state.authUsers : [];
+  if(!users.length){
+    ui.usersBoard.innerHTML = '<div class="empty">Nenhum usuário cadastrado ainda.</div>';
+    return;
+  }
+  ui.usersBoard.innerHTML = `
+    <div class="users-compact-list">
+      ${users.map(user => `
+        <button class="user-compact-item" type="button" data-open-user-edit="${esc(user.uid)}">
+          <span class="user-compact-main">
+            <strong>${esc(user.nick || user.name || user.email)}</strong>
+            <small>${esc(user.clanRole || 'Membro')} • ${esc(user.accessRole || 'viewer')}</small>
+          </span>
+          <span class="user-compact-email">${esc(user.email || '')}</span>
+        </button>
+      `).join('')}
+    </div>
+  `;
+}
+
+
+function openUserEdit(uid){
+  const users = Array.isArray(state.authUsers) ? state.authUsers : [];
+  const user = users.find(item => String(item.uid) === String(uid));
+  if(!user || !ui.userEditBody || !ui.userEditModal) return;
+
+  const cargoOptions = ['Membro','Ancião','Co-líder','Líder'];
+  const accessOptions = [
+    { value:'viewer', label:'Leitura' },
+    { value:'editor', label:'Editor' },
+    { value:'admin', label:'Líder' }
+  ];
+
+  ui.userEditBody.innerHTML = `
+    <div class="profile-popover-header user-edit-header">
+      <strong>${esc(user.nick || user.name || user.email || 'Usuário')}</strong>
+      <small>${esc(user.email || '')}</small>
+    </div>
+    <div class="user-edit-grid compact-popup">
+      <label class="field compact">
+        <span>Nome</span>
+        <input type="text" value="${esc(user.name || '')}" data-user-name="${esc(user.uid)}">
+      </label>
+      <label class="field compact">
+        <span>Nick</span>
+        <input type="text" value="${esc(user.nick || '')}" data-user-nick="${esc(user.uid)}">
+      </label>
+      <label class="field compact">
+        <span>Tag do jogador</span>
+        <input type="text" value="${esc(user.playerTag || '')}" placeholder="#Q2ABC123" data-user-player-tag="${esc(user.uid)}">
+      </label>
+      <label class="field compact">
+        <span>Cargo</span>
+        <select data-user-clan-role="${esc(user.uid)}">
+          ${cargoOptions.map(role => `<option value="${role}" ${String(user.clanRole || '').toLowerCase() === role.toLowerCase() ? 'selected' : ''}>${role}</option>`).join('')}
+        </select>
+      </label>
+      <label class="field compact">
+        <span>Acesso</span>
+        <select data-user-access-role="${esc(user.uid)}">
+          ${accessOptions.map(opt => `<option value="${opt.value}" ${String(user.accessRole || 'viewer') === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('')}
+        </select>
+      </label>
+    </div>
+    <div class="actions user-edit-actions">
+      <button class="primary" data-save-user-profile="${esc(user.uid)}">Salvar</button>
+      <button class="ghost danger" data-delete-user-profile="${esc(user.uid)}">Excluir usuário</button>
+    </div>
+    <p class="helper">A exclusão remove o usuário do sistema e bloqueia novo acesso com essa conta.</p>
+  `;
+  ui.userEditModal.classList.remove('hidden');
+}
+
+function closeUserEdit(){ ui.userEditModal?.classList.add('hidden'); }
+
+function renderVault(ctx, goals){
+  const annual = annualSummary();
+  const archived = state.members.filter(m => m.status === 'ARQUIVADO').length;
+  const currentTop = ctx.summaries[0];
+  ui.vaultInsights.innerHTML = `
+    <article class="insight-card">
+      <div class="insight-top">
+        <strong>Resumo rápido</strong>
+        <span class="chip blue">${monthLabel(state.meta.currentMonth)}</span>
+      </div>
+      <div class="chips">
+        <span class="chip">${activeMembers().length} ativos</span>
+        <span class="chip">${archived} arquivados</span>
+        <span class="chip">${ctx.maxWeeksStarted} semanas com atividade</span>
+      </div>
+    </article>
+    <article class="insight-card">
+      <div class="insight-top">
+        <strong>Melhor do mês</strong>
+        <span class="chip good">${currentTop ? currentTop.scoreElite : 0}</span>
+      </div>
+      <small>${currentTop ? esc(currentTop.member.name) + ' • ' + esc(currentTop.member.role) : 'Sem dados'}</small>
+    </article>
+    <article class="insight-card">
+      <div class="insight-top">
+        <strong>Topo anual</strong>
+        <span class="chip gold">${annual[0] ? annual[0].eliteTotal : 0}</span>
+      </div>
+      <small>${annual[0] ? esc(annual[0].member.name) + ' lidera a temporada.' : 'Sem dados'}</small>
+    </article>
+    <article class="insight-card">
+      <div class="insight-top">
+        <strong>Metas</strong>
+        <span class="chip">${goals.attacks}/${goals.tournament}</span>
+      </div>
+      <small>Ajuste as metas conforme o ritmo real da temporada.</small>
+    </article>
+  `;
+}
+
+function openMember(name){
+  const member = state.members.find(m => m.name === name);
+  if(!member) return;
+  const annual = annualSummary().find(row => row.member.name === name);
+  const bars = seedData.meta.months.map(month => {
+    const summary = monthContext(month).summaries.find(s => s.member.name === name);
+    const val = summary ? summary.scoreElite : 0;
+    return {month, val};
+  });
+  const current = monthContext(state.meta.currentMonth).summaries.find(s => s.member.name === name);
+  const maxElite = Math.max(1, ...bars.map(item => item.val || 0), current?.scoreElite || 0);
+  const initials = String(member.name || '?').split(' ').filter(Boolean).slice(0,2).map(part => part[0]).join('').toUpperCase();
+  const confidenceTone = current?.confidence === 'ALTA' ? 'good' : current?.confidence === 'MÉDIA' ? 'warn' : 'bad';
+  const alertTone = current?.alert === 'EXPULSÃO' ? 'bad' : current?.alert === 'RISCO' ? 'warn' : 'good';
+  const recentHistory = (state.history || []).filter(item => item.name === name).slice(-4).reverse();
+  const canEditProfile = canEditMemberProfile(member);
+  const isOwnProfile = memberMatchesCurrentUser(member);
+  const lockHint = isAdminApp() ? '' : (isOwnProfile ? 'Você pode editar apenas o seu cadastro.' : 'Somente o próprio membro ou um admin pode editar este cadastro.');
+
+  ui.memberModalBody.innerHTML = `
+    <div class="premium-profile-shell">
+      <div class="premium-profile-hero">
+        <div class="premium-avatar">${esc(initials)}</div>
+        <div class="premium-profile-copy">
+          <p class="eyebrow">Perfil premium do jogador<br></p>
+          <h3>${esc(member.name)}</h3>
+          <div class="mini">${esc(member.role)} • ${member.status}</div>
+          <div class="chips">
+            <span class="chip ${member.eligibleTournament ? 'good' : 'warn'}">${member.eligibleTournament ? 'Elegível torneio' : 'Não elegível'}</span>
+            <span class="chip blue">Mês ${monthLabel(state.meta.currentMonth)}</span>
+            <span class="chip ${confidenceTone}">${current?.confidence || 'Sem confiança'}</span>
+            <span class="chip ${alertTone}">${current?.alert || 'Sem alerta'}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="premium-profile-section">
+        <div class="premium-section-head">
+          <strong>Dados do jogador</strong>
+          <small>tag oficial para vínculo do sistema com a Guerra Auto</small>
+        </div>
+        <div class="stack">
+          <label class="field">
+            <span>Tag do jogador</span>
+            <input type="text" value="${esc(member.playerTag || '')}" placeholder="#Q2ABC123" data-member-tag="${esc(member.name)}" ${isAdminApp() ? '' : 'disabled'}>
+          </label>
+          ${isAdminApp() ? `<button class="primary" data-save-member-tag="${esc(member.name)}">Salvar tag</button>` : '<p class="helper">Somente administradores podem alterar a tag do jogador.</p>'}
+        </div>
+      </div>
+
+      <div class="premium-stat-grid">
+        <article class="premium-stat-card gold">
+          <span>Score ELITE</span>
+          <strong>${current ? current.scoreElite : 0}</strong>
+          <small>força competitiva atual</small>
+        </article>
+        <article class="premium-stat-card blue">
+          <span>Ataques no mês</span>
+          <strong>${current ? current.attacksMonth : 0}</strong>
+          <small>participação em guerra</small>
+        </article>
+        <article class="premium-stat-card green">
+          <span>Pontos torneio</span>
+          <strong>${current ? current.tournamentPoints : 0}</strong>
+          <small>resultado competitivo</small>
+        </article>
+        <article class="premium-stat-card">
+          <span>Temporada</span>
+          <strong>${annual ? annual.eliteTotal : 0}</strong>
+          <small>elite acumulado no ano</small>
+        </article>
+      </div>
+
+      <div class="premium-profile-section">
+        <div class="premium-section-head">
+          <strong>Evolução mensal</strong>
+          <small>desempenho do jogador ao longo da temporada</small>
+        </div>
+        <div class="premium-bars">
+          ${bars.map(item => {
+            const fill = Math.max(6, Math.round(((item.val || 0) / maxElite) * 100));
+            return `
+              <div class="premium-bar-item">
+                <div class="premium-bar-meta">
+                  <span>${monthLabel(item.month).slice(0,3)}</span>
+                  <strong>${item.val}</strong>
+                </div>
+                <div class="premium-bar-track"><span style="width:${fill}%"></span></div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+
+      <div class="premium-profile-section">
+        <div class="premium-section-head">
+          <strong>Resumo competitivo</strong>
+          <small>leitura rápida do estado atual do jogador</small>
+        </div>
+        <div class="premium-summary-grid">
+          <div class="premium-summary-item">
+            <span>Sugestão</span>
+            <strong>${current?.suggestion || 'Sem sugestão'}</strong>
+          </div>
+          
+          <div class="premium-summary-item">
+            <span>Colocação</span>
+            <strong>#${current?.classificationRank || '-'}</strong>
+          </div>
+          <div class="premium-summary-item">
+            <span>Classificação</span>
+            <strong>${current?.classificationPoints || 0} pts</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="premium-profile-section">
+        <div class="premium-section-head">
+          <strong>Histórico recente</strong>
+          <small>últimos registros e observações do sistema</small>
+        </div>
+        <div class="premium-history-list">
+          ${recentHistory.length ? recentHistory.map(item => `
+            <article class="premium-history-item">
+              <div>
+                <strong>${monthLabel(item.month || state.meta.currentMonth)} • Semana ${item.week || '-'}</strong>
+                <small>${item.suggestion || 'Sem sugestão'} • ${item.alert || 'Sem alerta'}</small>
+              </div>
+              <span class="chip ${item.alert === 'EXPULSÃO' ? 'bad' : item.alert === 'RISCO' ? 'warn' : 'good'}">${item.scoreElite || 0} elite</span>
+            </article>
+          `).join('') : `<div class="empty">Sem histórico recente registrado.</div>`}
+        </div>
+      </div>
+
+      </div>
+
+      <div class="premium-profile-section">
+        <div class="premium-section-head">
+          <strong>Nota do líder</strong>
+          <small>ajuste manual e acompanhamento individual</small>
+        </div>
+        <div class="stack">
+          <label class="field">
+            <span>Nota do líder</span>
+            <input type="text" value="${esc(member.notes?.leaderNote || member.notes?.manualNote || '')}" data-member-note="${esc(member.name)}" ${isAdminApp() ? '' : 'disabled'}>
+          </label>
+          <button class="primary" data-save-member-note="${esc(member.name)}" ${isAdminApp() ? '' : 'disabled'}>Salvar nota</button>
+          ${!isAdminApp() ? '<p class="helper">Nota do líder disponível apenas para admin.</p>' : ''}
+        </div>
+      </div>
+
+      <div class="premium-profile-section compact member-quick-actions-shell">
+        <div class="premium-section-head">
+          <strong>Ações rápidas</strong>
+          <small>atalhos essenciais do membro</small>
+        </div>
+        <div class="member-quick-actions">
+          <button class="ghost" type="button" data-toggle-archive="${esc(member.name)}" ${isAdminApp() ? '' : 'disabled'}>${member.status === 'ARQUIVADO' ? 'Reativar membro' : 'Arquivar membro'}</button>
+        </div>
+        ${!isAdminApp() ? `<p class="helper">Somente líder ou editor pode arquivar ou reativar.</p>` : ''}
+      </div>
+
+      <div class="chips" style="margin-top:18px">
+        <span class="chip blue">Ano ${annual ? annual.eliteTotal : 0} elite</span>
+        <span class="chip">${annual ? annual.attacksYear : 0} ataques ano</span>
+        <span class="chip">${annual ? annual.tournamentYear : 0} torneio ano</span>
+      </div>
+    </div>
+  `;
+  ui.memberModal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeMember(){ ui.memberModal.classList.add('hidden'); document.body.style.overflow = ''; }
+function openGoals(){
+  const goals = state.goals[state.meta.currentMonth] || {attacks:1200,tournament:80};
+  $('#goalAttacksInput').value = goals.attacks;
+  $('#goalTournamentInput').value = goals.tournament;
+  ui.goalModal.classList.remove('hidden');
+}
+function closeGoals(){ ui.goalModal.classList.add('hidden'); }
+
+function openCreateMemberModal(){
+  if(!ui.createMemberModal) return;
+  ui.createMemberModal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(() => (ui.createMemberName || ui.createMemberNick)?.focus());
+}
+function closeCreateMemberModal(){
+  if(!ui.createMemberModal) return;
+  ui.createMemberModal.classList.add('hidden');
+  if(ui.createMemberForm) ui.createMemberForm.reset();
+  document.body.style.overflow = '';
+}
+function exportBackup(){
+  const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `topbrs-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+function importBackup(file){
+  const reader = new FileReader();
+  reader.onload = () => {
+    try{
+      const imported = hydrateSeed(JSON.parse(reader.result));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(imported));
+location.reload();
+    }catch(e){
+      alert('Backup inválido ou incompatível com a versão atual.');
+    }
+  };
+  reader.readAsText(file);
+}
+function toggleArchive(name){
+  if(!isAdminApp()) return;
+  const member = state.members.find(m => m.name === name);
+  if(!member) return;
+  if(member.status === 'ARQUIVADO'){
+    member.status = 'ATIVO';
+    member.exitDate = null;
+    member.exitReason = null;
+  }else{
+    member.status = 'ARQUIVADO';
+    member.exitDate = new Date().toISOString().slice(0,10);
+    member.exitReason = 'Arquivado pelo app';
+  }
+  saveState();
+  closeMember();
+  render();
+  if(member.status === 'ARQUIVADO'){
+    setActiveView('archivedView');
+  }
+}
+function addMember(){
+  openCreateMemberModal();
+}
+function createMemberFromModal(){
+  const name = (ui.createMemberName?.value || '').trim();
+  const nick = (ui.createMemberNick?.value || '').trim();
+  const playerTag = normalizePlayerTag(ui.createMemberTag?.value || '');
+  if(!name || !nick) return;
+  const role = (ui.createMemberRole?.value || 'Ancião').trim() || 'Ancião';
+  state.members.unshift({
+    id: nick.toLowerCase().replace(/[^a-z0-9]+/g,'-'),
+    name: nick,
+    fullName: name,
+    nick,
+    playerTag,
+    role, eligibleTournament:true, observation:'', status:'ATIVO',
+    exitDate:null, exitReason:null, exitObservation:null, notes:{}
+  });
+  for(const month of seedData.meta.months){
+    for(let week=1;week<=4;week++) ensureWeekMember(month, week, nick);
+    ensureTournamentMember(month, nick);
+  }
+  saveState();
+  closeCreateMemberModal();
+  render();
+}
+function toggleAttack(payload){
+  const [name, week, day, idx] = encodedParts(payload, 4);
+  if(!ensureCanAdjustPointsForMember({ name }, 'pontuação')) return;
+  const record = ensureWeekMember(state.meta.currentMonth, Number(week), name);
+  record.days[day].attacks[Number(idx)] = !record.days[day].attacks[Number(idx)];
+  recomputeWeekRecord(record);
+  saveState();
+  render();
+}
+function toggleParticipation(payload){
+  const [name, week] = encodedParts(payload, 2);
+  if(!ensureCanAdjustPointsForMember({ name }, 'pontuação')) return;
+  const record = ensureTournamentMember(state.meta.currentMonth, name);
+  const row = record.weeks[Number(week)-1];
+  row.participated = !row.participated;
+  row.points = computeTournamentPoints(row.position, row.participated);
+  saveState();
+  render();
+}
+function setTournamentPosition(payload, value){
+  const [name, week] = encodedParts(payload, 2);
+  if(!ensureCanAdjustPointsForMember({ name }, 'pontuação')) return;
+  const record = ensureTournamentMember(state.meta.currentMonth, name);
+  const row = record.weeks[Number(week)-1];
+  const position = value ? Number(value) : null;
+  row.position = position;
+  row.participated = !!position || row.participated;
+  row.points = computeTournamentPoints(row.position, row.participated);
+  saveState();
+  render();
+}
+function updatePosition(payload, value){
+  const [name, week] = encodedParts(payload, 2);
+  if(!ensureCanAdjustPointsForMember({ name }, 'pontuação')) return;
+  const record = ensureTournamentMember(state.meta.currentMonth, name);
+  const row = record.weeks[Number(week)-1];
+  row.position = value ? Number(value) : null;
+  if(row.position) row.participated = true;
+  row.points = computeTournamentPoints(row.position, row.participated);
+  saveState();
+  render();
+}
+function saveMemberTag(name){
+  const member = state.members.find(item => item.name === name);
+  if(!member || !canEditMemberProfile(member)) return;
+  const input = document.querySelector(`[data-member-tag="${CSS.escape(String(name))}"]`);
+  const btn = document.querySelector(`[data-save-member-tag="${CSS.escape(String(name))}"]`);
+  if(!input) return;
+  setButtonWorking(btn, true);
+  member.playerTag = normalizePlayerTag(input.value || '');
+  saveState();
+  showToast('Tag do jogador salva com sucesso.');
+  renderWarAutoView?.();
+  setButtonWorking(btn, false, 'Salvo');
+}
+
+function saveMemberNote(name){
+  if(!isAdminApp()) return;
+  const input = document.querySelector(`[data-member-note="${CSS.escape(name)}"]`);
+  const btn = document.querySelector(`[data-save-member-note="${CSS.escape(name)}"]`);
+  if(!input) return;
+  const member = state.members.find(m => m.name === name);
+  member.notes ||= {};
+  setButtonWorking(btn, true);
+  member.notes.leaderNote = input.value;
+  saveState();
+  showToast('Nota salva com sucesso.');
+  setButtonWorking(btn, false, 'Salvo');
+}
+function openShareCard(){
+  const ctx = monthContext(state.meta.currentMonth);
+  const top = ctx.summaries.slice(0,5);
+  const canvas = $('#shareCanvas');
+  const c = canvas.getContext('2d');
+  c.clearRect(0,0,canvas.width,canvas.height);
+  const grad = c.createLinearGradient(0,0,canvas.width,canvas.height);
+  grad.addColorStop(0,'#0d1532');
+  grad.addColorStop(.5,'#131f46');
+  grad.addColorStop(1,'#24120c');
+  c.fillStyle = grad;
+  c.fillRect(0,0,canvas.width,canvas.height);
+  c.fillStyle = 'rgba(255,255,255,0.08)';
+  c.beginPath(); c.arc(930,120,180,0,Math.PI*2); c.fill();
+  c.beginPath(); c.arc(120,1180,220,0,Math.PI*2); c.fill();
+  c.fillStyle = '#ffca55';
+  c.font = '700 34px -apple-system, sans-serif';
+  c.fillText("TOP BRS", 72, 96);
+  c.fillStyle = '#ffffff';
+  c.font = '900 74px -apple-system, sans-serif';
+  c.fillText('Ranking Elite', 72, 176);
+  c.font = '500 30px -apple-system, sans-serif';
+  c.fillStyle = '#d9e4ff';
+  c.fillText(monthLabel(state.meta.currentMonth) + ' • modo mito ativo', 72, 226);
+
+  top.forEach((item, idx) => {
+    const y = 292 + idx*184;
+    c.fillStyle = 'rgba(10,16,34,0.72)';
+    roundRect(c,72,y,936,144,28,true,false);
+    c.fillStyle = idx===0 ? '#ffca55' : idx===1 ? '#d7e0ff' : idx===2 ? '#ffb26a' : '#53a2ff';
+    roundRect(c,92,y+24,86,96,24,true,false);
+    c.fillStyle = '#08101f';
+    c.font = '900 44px -apple-system, sans-serif';
+    c.fillText(String(idx+1), 124, y+84);
+    c.fillStyle = '#ffffff';
+    c.font = '800 40px -apple-system, sans-serif';
+    c.fillText(item.member.name.slice(0,24), 204, y+68);
+    c.fillStyle = '#aebee5';
+    c.font = '500 26px -apple-system, sans-serif';
+    c.fillText(`${item.member.role} • ${item.attacksMonth} ataques • ${item.tournamentPoints} torneio`, 204, y+106);
+    c.fillStyle = '#ffffff';
+    c.font = '900 50px -apple-system, sans-serif';
+    c.fillText(String(item.scoreElite), 888, y+88);
+    c.fillStyle = item.confidence === 'ALTA' ? '#7dffc7' : item.confidence === 'MÉDIA' ? '#ffe08f' : '#ff9ba7';
+    c.font = '700 24px -apple-system, sans-serif';
+    c.fillText(item.confidence, 834, y+116);
+  });
+  c.fillStyle = '#aebee5';
+  c.font = '500 24px -apple-system, sans-serif';
+  c.fillText('Gerado pelo Ultra PWA • offline • pronto para compartilhar', 72, 1290);
+
+  canvas.toBlob(async blob => {
+    const file = new File([blob], 'topbrs-ranking.png', {type:'image/png'});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:"TOP BRS' Ranking"});
+    }else{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'topbrs-ranking.png';
+      a.click();
+    }
+  });
+}
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+  if(fill) ctx.fill();
+  if(stroke) ctx.stroke();
+}
+
+
+function updateFloatingHeader(){
+  const topbar = document.querySelector('.topbar');
+  if(!topbar) return;
+  topbar.classList.remove('floating');
+}
+
+function scrollToTopSmooth(){
+  try{
+    window.scrollTo({top:0, behavior:'smooth'});
+  }catch(e){
+    window.scrollTo(0,0);
+  }
+}
+function updateBackToTopVisibility(){
+  if(ui.backToTopBtn) ui.backToTopBtn.classList.remove('visible');
+  const fab = document.querySelector('#classificationView .classification-floating-self');
+  const scrollTop = (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0);
+  if(fab && window.__topbrsSelfFabDismissed && scrollTop < 220){
+    fab.classList.remove('is-hidden');
+    window.__topbrsSelfFabDismissed = false;
+  }
+}
+
+function setActiveView(viewId){
+  if(viewId === 'warView') viewId = 'warAutoView';
+  if(viewId === 'eliteView') viewId = 'classificationView';
+  $all('.view').forEach(v => v.classList.toggle('active', v.id === viewId));
+  $all('[data-view]').forEach(btn => btn.classList.toggle('active', btn.dataset.view === viewId));
+  document.body.classList.toggle('members-view-theme', viewId === 'membersView');
+  document.body.classList.remove('view-arena','view-war-auto','view-tournament');
+  if(viewId === 'arenaView') document.body.classList.add('view-arena');
+  if(viewId === 'warAutoView') document.body.classList.add('view-war-auto');
+  if(viewId === 'tournamentView') document.body.classList.add('view-tournament');
+  updateTopbarTitle(viewId);
+  if(viewId === 'warAutoView') renderWarAutoView({ force:true });
+  if(viewId === 'warRankingView') renderWarRankingView(true);
+  if(viewId === 'membersSyncView') renderMembersSyncView(true);
+  if(viewId === 'apiLogsView') renderApiLogsView(true);
+  if(viewId === 'hubLeaderView') renderHubLeaderView();
+  if(viewId === 'hubRiskView') renderHubRiskView();
+  if(viewId === 'hubDecisionView') renderHubDecisionView();
+  if(viewId === 'hubClanView') renderHubClanView();
+  if(viewId === 'decksView') renderDecksView(false);
+  updateNotificationBadge();
+  updateNotificationBadge();
+  if(['arenaView','classificationView','eliteView'].includes(viewId)) bootstrapWarHistoryForArena(false);
+  toggleViewMenu(false);
+  if(ui.heroSection){ ui.heroSection.classList.toggle('hidden', ['arenaView','eliteView','classificationView','tournamentView','vaultView','membersView','usersView','archivedView','warAutoView','warRankingView','membersSyncView','apiLogsView','decksView','hubLeaderView','hubRiskView','hubDecisionView','hubClanView'].includes(viewId)); }
+  if(ui.weekHeroPicker){ ui.weekHeroPicker.classList.toggle('hidden', true); }
+  if(viewId !== 'vaultView') lastNonVaultView = viewId;
+  closeDrawer();
+  requestAnimationFrame(applyDynamicTopSpacing);
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+function openDrawer(force=true){
+  if(!ui.sideDrawer) return;
+  const shouldOpen = typeof force === 'boolean' ? force : true;
+  ui.sideDrawer.classList.toggle('drawer-open', shouldOpen);
+  ui.sideDrawer.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
+  document.body.classList.toggle('drawer-visible', shouldOpen);
+  if(shouldOpen){ updateDrawerProfileSummary(true); refreshDrawerMenuCustomization(); }
+}
+
+function closeDrawer(){
+  if(!ui.sideDrawer) return;
+  ui.sideDrawer.classList.remove('drawer-open');
+  ui.sideDrawer.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('drawer-visible');
+}
+
+function handleTouchStart(e){
+  if(e.touches.length !== 1) return;
+  const target = e.target;
+  if(target.closest('input, textarea, select, button, .drawer-panel, .modal-card')) return;
+  const t = e.touches[0];
+  touchMenuState = {x:t.clientX, y:t.clientY, handled:false};
+}
+function handleTouchMove(e){
+  if(!touchMenuState || touchMenuState.handled || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const dx = t.clientX - touchMenuState.x;
+  const dy = Math.abs(t.clientY - touchMenuState.y);
+  if(dy > 42) { touchMenuState = null; return; }
+  if(!document.body.classList.contains('drawer-visible') && touchMenuState.x > (window.innerWidth - 44) && dx < -50){
+    openDrawer(true);
+    touchMenuState.handled = true;
+    return;
+  }
+  if(document.body.classList.contains('drawer-visible') && dx > 50){
+    closeDrawer();
+    touchMenuState.handled = true;
+  }
+}
+function handleTouchEnd(){
+  touchMenuState = null;
+}
+
+function isVaultUnlocked(){
+  try{
+    return sessionStorage.getItem(VAULT_SESSION_KEY) === '1';
+  }catch(e){
+    return false;
+  }
+}
+function unlockVaultSession(){
+  try{ sessionStorage.setItem(VAULT_SESSION_KEY, '1'); 
+}catch(e){}
+}
+function closeVaultPrompt(){
+  if(!ui.vaultAccessModal) return;
+  ui.vaultAccessModal.classList.add('hidden');
+  ui.vaultAccessModal.setAttribute('aria-hidden','true');
+  ui.vaultAccessError?.classList.add('hidden');
+  if(ui.vaultPasswordInput) ui.vaultPasswordInput.value = '';
+  document.body.style.overflow = '';
+}
+function openVaultPrompt(){
+  if(!ui.vaultAccessModal) return;
+  ui.vaultAccessModal.classList.remove('hidden');
+  ui.vaultAccessModal.setAttribute('aria-hidden','false');
+  ui.vaultAccessError?.classList.add('hidden');
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(() => ui.vaultPasswordInput?.focus());
+}
+function signalVaultError(){
+  const card = ui.vaultAccessModal?.querySelector('.vault-lock-card');
+  ui.vaultAccessError?.classList.remove('hidden');
+  if(card){
+    card.classList.remove('error');
+    void card.offsetWidth;
+    card.classList.add('error');
+  }
+}
+function requestVaultAccess(){
+  if(isVaultUnlocked()){
+    setActiveView('vaultView');
+    return;
+  }
+  openVaultPrompt();
+}
+
+function bind(){
+  ui.monthSelect.addEventListener('change', e => { state.meta.currentMonth = e.target.value; state.ui.classificationMonth = e.target.value; saveState(); render(); });
+  ui.classificationMonthSelect?.addEventListener('change', e => { state.ui.classificationMonth = e.target.value; saveState(); render(); });
+  ui.weekSelect.addEventListener('change', e => { state.meta.currentWeek = Number(e.target.value); saveState(); render(); });
+  document.body.addEventListener('click', e => {
+    const menuTrigger = e.target.closest('#currentViewBadge');
+    if(menuTrigger){
+      toggleViewMenu();
+      return;
+    }
+    if(e.target.closest('[data-close-view-menu]')){ toggleViewMenu(false); return; }
+    if(ui.viewMenuDropdown && !e.target.closest('.view-menu-wrap')) toggleViewMenu(false);
+    const drawerMoveBtn = e.target.closest('.drawer-sort-btn');
+    if(drawerMoveBtn){
+      const drawerLink = drawerMoveBtn.closest('.drawer-link');
+      if(drawerLink) moveDrawerLink(drawerLink.dataset.view, drawerMoveBtn.dataset.drawerMove || 'up');
+      return;
+    }
+
+    const viewBtn = e.target.closest('[data-view]');
+    if(viewBtn){
+      if(drawerMenuEditMode && viewBtn.closest('.drawer-menu')){
+        return;
+      }
+      if(viewBtn.dataset.view === 'vaultView'){
+        requestVaultAccess();
+      }else{
+        setActiveView(viewBtn.dataset.view);
+      }
+      return;
+    }
+    if(e.target.closest('#drawerNotificationBtn')){
+      openNotificationCenter();
+      return;
+    }
+    if(e.target.closest('[data-close-notification-center]')){
+      closeNotificationCenter();
+      return;
+    }
+    if(e.target.closest('[data-close-member-alert]')){
+      closeMemberAlert(true);
+      return;
+    }
+    if(e.target.closest('[data-close-alert-composer]')){
+      closeAlertComposer();
+      return;
+    }
+    const openComposerBtn = e.target.closest('[data-open-alert-composer]');
+    if(openComposerBtn){
+      try{ openAlertComposer(JSON.parse(openComposerBtn.dataset.openAlertComposer || '{}')); }catch(err){}
+      return;
+    }
+    const openGlobalNoticeBtn = e.target.closest('[data-open-global-notice]');
+    if(openGlobalNoticeBtn){
+      openAlertComposer({ name:'Clã TopBRS', playerTag:'' }, { leadershipMode:true, defaultScope:'global' });
+      return;
+    }
+    const templateBtn = e.target.closest('[data-alert-template]');
+    if(templateBtn){
+      (async() => {
+        try{
+          const member = JSON.parse(ui.alertComposerModal?.dataset.member || '{}');
+          const ok = await sendSmartAlert(member, templateBtn.dataset.alertTemplate || 'observation');
+          if(ok) closeAlertComposer();
+        }catch(err){ console.warn('template alert', err); }
+      })();
+      return;
+    }
+    const sendLeadershipNoticeBtn = e.target.closest('#sendLeadershipNoticeBtn');
+    if(sendLeadershipNoticeBtn){
+      (async() => {
+        try{
+          const member = JSON.parse(ui.alertComposerModal?.dataset.member || '{}');
+          const message = document.getElementById('leadershipNoticeInput')?.value || '';
+          const scope = document.getElementById('leadershipNoticeScope')?.value || 'member';
+          const targetMember = document.getElementById('leadershipTargetMember')?.value || '';
+          const ok = await sendLeadershipNotice(member, message, scope, targetMember);
+          if(ok) closeAlertComposer();
+        }catch(err){ console.warn('leadership notice send', err); }
+      })();
+      return;
+    }
+    const notifOpenBtn = e.target.closest('[data-open-alert-id]');
+    if(notifOpenBtn){
+      const item = getCurrentUserAlerts().find(alert => String(alert.id || '') === String(notifOpenBtn.dataset.openAlertId || ''));
+      if(item){
+        closeNotificationCenter();
+        openMemberAlertFromItem(item);
+      }
+      return;
+    }
+    const notifDeleteBtn = e.target.closest('[data-delete-alert-id]');
+    if(notifDeleteBtn){
+      deleteAlertById(notifDeleteBtn.dataset.deleteAlertId || '');
+      return;
+    }
+
+    const drawerEditBtn = e.target.closest('#drawerEditMenuBtn');
+    if(drawerEditBtn){
+      setDrawerMenuEditMode(!drawerMenuEditMode);
+      return;
+    }
+    const drawerSaveBtn = e.target.closest('#drawerSaveMenuBtn');
+    if(drawerSaveBtn){
+      saveDrawerMenuOrder(getVisibleDrawerLinks().map(btn => btn.dataset.view));
+      setDrawerMenuEditMode(false);
+      showToast('Menu salvo com sucesso.');
+      return;
+    }
+    const drawerCancelBtn = e.target.closest('#drawerCancelMenuBtn');
+    if(drawerCancelBtn){
+      applyDrawerMenuOrder(readDrawerMenuOrder());
+      setDrawerMenuEditMode(false);
+      return;
+    }
+    const selfJumpBtn = e.target.closest('[data-jump-self-rank]');
+    if(selfJumpBtn){
+      const targetRow = document.querySelector(`[data-class-rank-row="${selfJumpBtn.dataset.jumpSelfRank || ''}"]`);
+      if(targetRow){
+        targetRow.scrollIntoView({behavior:'smooth', block:'center'});
+        selfJumpBtn.classList.add('is-hidden');
+        window.__topbrsSelfFabDismissed = true;
+      }
+      return;
+    }
+    const rankBtn = e.target.closest('[data-rank-mode]');
+    if(rankBtn){
+      rankMode = rankBtn.dataset.rankMode;
+      $all('[data-rank-mode]').forEach(btn => btn.classList.toggle('active', btn === rankBtn));
+      render();
+    }
+    const warBtn = e.target.closest('[data-war-filter]');
+    if(warBtn){
+      warFilter = warBtn.dataset.warFilter;
+      $all('[data-war-filter]').forEach(btn => btn.classList.toggle('active', btn === warBtn));
+      render();
+    }
+    const collapseBtn = e.target.closest('[data-collapse-member]');
+    if(collapseBtn){
+      const [mode, encodedName] = String(collapseBtn.dataset.collapseMember || '').split('|');
+      toggleMemberCollapse(mode, decodeURIComponent(encodedName || ''));
+      return;
+    }
+    const attackBtn = e.target.closest('[data-toggle-attack]');
+    if(attackBtn) toggleAttack(attackBtn.dataset.toggleAttack);
+    const partBtn = e.target.closest('[data-toggle-participation]');
+    if(partBtn) toggleParticipation(partBtn.dataset.toggleParticipation);
+    const hubMonthBtn = e.target.closest('[data-hub-month]');
+    if(hubMonthBtn){
+      state.ui.hubMonth = canonicalMonthKey(hubMonthBtn.dataset.hubMonth);
+      saveState();
+      renderHubLeaderView(); renderHubRiskView(); renderHubDecisionView(); renderHubClanView();
+      return;
+    }
+    const hubWeekBtn = e.target.closest('[data-hub-week]');
+    if(hubWeekBtn){
+      state.ui.hubWeek = Number(hubWeekBtn.dataset.hubWeek || 1);
+      saveState();
+      renderHubLeaderView(); renderHubRiskView(); renderHubDecisionView(); renderHubClanView();
+      return;
+    }
+    const hubFilterBtn = e.target.closest('[data-hub-filter-type]');
+    if(hubFilterBtn){
+      const type = String(hubFilterBtn.dataset.hubFilterType || '');
+      const value = String(hubFilterBtn.dataset.hubFilterValue || 'all');
+      if(type === 'risk') setHubUiFilter('hubRiskFilter', value);
+      if(type === 'decision') setHubUiFilter('hubDecisionFilter', value);
+      if(type === 'clan') setHubUiFilter('hubClanFilter', value);
+      renderHubRiskView(); renderHubDecisionView(); renderHubClanView();
+      return;
+    }
+    const hubToggleBtn = e.target.closest('[data-hub-toggle-row]');
+    if(hubToggleBtn){
+      const [section, encodedName] = String(hubToggleBtn.dataset.hubToggleRow || '').split('|');
+      toggleHubRowExpansion(section, decodeURIComponent(encodedName || ''));
+      renderHubRiskView(); renderHubDecisionView(); renderHubClanView();
+      return;
+    }
+    const quickPosBtn = e.target.closest('[data-quick-position]');
+    if(quickPosBtn) setTournamentPosition(quickPosBtn.dataset.quickPosition, quickPosBtn.dataset.positionValue);
+    const classificationDetailBtn = e.target.closest('[data-classification-detail]');
+    if(classificationDetailBtn){
+      openClassificationDetail(classificationDetailBtn.dataset.classificationDetail || '');
+      return;
+    }
+    const classificationModeBtn = e.target.closest('[data-classification-mode]');
+    if(classificationModeBtn){
+      state.ui ||= {};
+      state.ui.classificationMode = classificationModeBtn.dataset.classificationMode || 'geral';
+      saveState();
+      renderClassification();
+      return;
+    }
+    const jumpSelfBtn = e.target.closest('[data-jump-self-rank]');
+    if(jumpSelfBtn){
+      const rank = Number(jumpSelfBtn.dataset.jumpSelfRank || 0);
+      const row = document.querySelector(`[data-class-rank-row="${rank}"]`);
+      if(row){
+        row.scrollIntoView({ behavior:'smooth', block:'center' });
+        jumpSelfBtn.classList.add('is-hidden');
+      }
+      return;
+    }
+    const classificationWeekBtn = e.target.closest('[data-classification-week]');
+    if(classificationWeekBtn){
+      state.ui ||= {};
+      state.ui.classificationWeek = Number(classificationWeekBtn.dataset.classificationWeek || 1);
+      saveState();
+      renderClassification();
+    }
+    const monthChip = e.target.closest('[data-classification-month]');
+    if(monthChip){
+      state.ui.classificationMonth = monthChip.dataset.classificationMonth;
+      saveState();
+      renderClassification();
+      if(ui.classificationMonthSelect) ui.classificationMonthSelect.value = state.ui.classificationMonth;
+    }
+    const heroMonthChip = e.target.closest('[data-month-chip]');
+    if(heroMonthChip){
+      state.meta.currentMonth = heroMonthChip.dataset.monthChip;
+      state.ui.classificationMonth = state.meta.currentMonth;
+      saveState();
+      render();
+    }
+    const localMonthChip = e.target.closest('[data-local-month-chip]');
+    if(localMonthChip){
+      state.meta.currentMonth = localMonthChip.dataset.localMonthChip;
+      state.ui.classificationMonth = state.meta.currentMonth;
+      saveState();
+      render();
+    }
+    const heroWeekChip = e.target.closest('[data-week-chip]');
+    if(heroWeekChip){
+      state.meta.currentWeek = Number(heroWeekChip.dataset.weekChip || 1);
+      saveState();
+      render();
+    }
+    const openUserBtn = e.target.closest('[data-open-user-edit]');
+    if(openUserBtn){ openUserEdit(openUserBtn.dataset.openUserEdit); return; }
+    const saveUserBtn = e.target.closest('[data-save-user-profile]');
+    if(saveUserBtn && window.TOPBRS_AUTH_UI?.saveUserProfileFromInputs){
+      window.TOPBRS_AUTH_UI.saveUserProfileFromInputs(saveUserBtn.dataset.saveUserProfile);
+      closeUserEdit();
+      return;
+    }
+    const deleteUserBtn = e.target.closest('[data-delete-user-profile]');
+    if(deleteUserBtn && window.TOPBRS_AUTH_UI?.deleteUser){
+      if(confirm('Remover este usuário do sistema?')){
+        window.TOPBRS_AUTH_UI.deleteUser(deleteUserBtn.dataset.deleteUserProfile);
+        closeUserEdit();
+      }
+      return;
+    }
+    const memberCollapseBtn = e.target.closest('[data-member-collapse]');
+    if(memberCollapseBtn){
+      const name = memberCollapseBtn.dataset.memberCollapse;
+      state.ui.membersCollapsed[name] = !(state.ui.membersCollapsed?.[name] !== false);
+      saveState();
+      renderMembers(monthContext(canonicalMonthKey(state.meta.currentMonth)));
+      return;
+    }
+    const memberOpen = e.target.closest('[data-open-member]');
+    if(memberOpen){ openMember(memberOpen.dataset.openMember); return; }
+    const memberActionBtn = e.target.closest('[data-open-member-action]');
+    if(memberActionBtn){ openMemberAction(memberActionBtn.dataset.openMemberAction); return; }
+    const actionChoiceBtn = e.target.closest('[data-member-action-choice]');
+    if(actionChoiceBtn){ applyMemberAction(actionChoiceBtn.dataset.memberActionChoice, actionChoiceBtn.dataset.memberActionName); return; }
+    const toggleArchiveBtn = e.target.closest('[data-toggle-archive]');
+    if(toggleArchiveBtn){ toggleArchive(toggleArchiveBtn.dataset.toggleArchive); return; }
+    const warAutoToggleBtn = e.target.closest('[data-war-auto-toggle]');
+    if(warAutoToggleBtn){ toggleWarAutoMember(warAutoToggleBtn.dataset.warAutoToggle); return; }
+    const restoreMemberBtn = e.target.closest('[data-restore-member]');
+    if(restoreMemberBtn){ toggleArchive(restoreMemberBtn.dataset.restoreMember); return; }
+    const deleteMemberBtn = e.target.closest('[data-delete-member]');
+    if(deleteMemberBtn){ deleteArchivedMember(deleteMemberBtn.dataset.deleteMember); return; }
+    const saveMemberTagBtn = e.target.closest('[data-save-member-tag]');
+    if(saveMemberTagBtn){ saveMemberTag(saveMemberTagBtn.dataset.saveMemberTag); return; }
+    const syncIntegrateBtn = e.target.closest('[data-sync-integrate]');
+    if(syncIntegrateBtn){ integrateSyncedMember(syncIntegrateBtn.dataset.syncIntegrate); return; }
+    const saveNoteBtn = e.target.closest('[data-save-member-note]');
+    if(saveNoteBtn) saveMemberNote(saveNoteBtn.dataset.saveMemberNote);
+    if(e.target.matches('[data-close-classification-detail]') || e.target === ui.classificationDetailModal){ closeClassificationDetail(); return; }
+    if(e.target.matches('[data-close-modal]') || e.target === ui.memberModal) closeMember();
+    if(e.target.matches('[data-close-user-edit]') || e.target === ui.userEditModal) closeUserEdit();
+    if(e.target.matches('[data-close-member-action]') || e.target === ui.memberActionModal) closeMemberAction();
+    if(e.target.matches('[data-open-goals]')) openGoals();
+    if(e.target.matches('[data-close-goal]') || e.target === ui.goalModal) closeGoals();
+    if(e.target.matches('[data-close-create-member]') || e.target === ui.createMemberModal) closeCreateMemberModal();
+    if(e.target === ui.vaultAccessModal || e.target === ui.vaultAccessCancelBtn) { closeVaultPrompt(); setActiveView(lastNonVaultView || 'arenaView'); }
+    if(e.target.closest('[data-scroll-top]') || e.target === ui.backToTopBtn) scrollToTopSmooth();
+    const clearBtn = e.target.closest('[data-tool-clear]');
+    if(clearBtn){
+      const mode = clearBtn.dataset.toolClear;
+      if(mode === 'war'){ state.ui.warQuery = ''; state.ui.warRole = 'ALL'; }
+      if(mode === 'tournament'){ state.ui.tournamentQuery = ''; state.ui.tournamentRole = 'ALL'; }
+      saveState();
+      render();
+    }
+  });
+  ui.currentViewBadge?.addEventListener('click', ()=> openDrawer(true));
+  ui.menuToggleBtn?.addEventListener('click', ()=> openDrawer(true));
+  ui.warAutoRefreshBtn?.addEventListener('click', ()=> runWarAutoRefreshCycle('manual'));
+  ui.warRankingRefreshBtn?.addEventListener('click', ()=> renderWarRankingView(true));
+  document.addEventListener('click', (e) => {
+    const tournamentMonthBtn = e.target.closest('[data-tournament-month]');
+    if(tournamentMonthBtn){
+      tournamentMonthBtn.classList.add('tap-press');
+      setTimeout(() => tournamentMonthBtn.classList.remove('tap-press'), 180);
+      state.ui ||= {};
+      state.ui.tournamentMonth = tournamentMonthBtn.dataset.tournamentMonth;
+      saveState();
+      render();
+      return;
+    }
+
+    const tournamentWeekBtn = e.target.closest('[data-tournament-week]');
+    if(tournamentWeekBtn){
+      tournamentWeekBtn.classList.add('tap-press');
+      setTimeout(() => tournamentWeekBtn.classList.remove('tap-press'), 180);
+      state.ui ||= {};
+      state.ui.tournamentWeek = Number(tournamentWeekBtn.dataset.tournamentWeek || 1);
+      saveState();
+      render();
+      return;
+    }
+
+    const mb = e.target.closest('[data-war-ranking-month]');
+    if(mb){ state.ui ||= {}; state.ui.warRankingMonth = mb.dataset.warRankingMonth; saveState(); renderWarRankingView(true); }
+    const wb = e.target.closest('[data-war-ranking-week]');
+    if(wb){ state.ui ||= {}; state.ui.warRankingWeek = Number(wb.dataset.warRankingWeek || 1); saveState(); renderWarRankingView(true); }
+  });
+  document.addEventListener('click', async (e) => {
+    const manualBtn = e.target.closest('[data-war-adjust]');
+    if(manualBtn){
+      try{ await promptWarOverride(JSON.parse(manualBtn.dataset.warAdjust || '{}'), 'war-auto'); }catch(err){ console.warn('manual adjust parse', err); }
+      return;
+    }
+  });
+  ui.membersRoleFilters?.addEventListener('click', e => { const btn = e.target.closest('[data-members-role]'); if(!btn) return; state.ui.membersRoleFilter = btn.dataset.membersRole || 'ALL'; saveState(); renderMembers(monthContext(canonicalMonthKey(state.meta.currentMonth))); });
+  ui.membersStatusFilters?.addEventListener('click', e => { const btn = e.target.closest('[data-members-status]'); if(!btn) return; state.ui.membersStatusFilter = btn.dataset.membersStatus || 'ALL'; saveState(); renderMembers(monthContext(canonicalMonthKey(state.meta.currentMonth))); });
+  ui.membersSearchInput?.addEventListener('input', e => { state.ui.membersSearch = e.target.value || ''; saveState(); renderMembers(monthContext(canonicalMonthKey(state.meta.currentMonth))); });
+  ui.membersSortSelect?.addEventListener('change', e => { state.ui.membersSort = e.target.value || 'points'; saveState(); renderMembers(monthContext(canonicalMonthKey(state.meta.currentMonth))); });
+  ui.membersSyncRefreshBtn?.addEventListener('click', ()=> renderMembersSyncView(true));
+  ui.apiLogsRefreshBtn?.addEventListener('click', ()=> renderApiLogsView(true));
+  ui.warAutoPrepareBtn?.addEventListener('click', ()=> prepareWarAutoWeekFromRoster());
+  ui.warAutoMonthChipBar?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-war-auto-month]');
+    if(!btn) return;
+    const nextMonth = btn.dataset.warAutoMonth;
+    if(!nextMonth) return;
+    state.ui ||= {};
+    state.ui.warAutoMonth = nextMonth;
+    saveState();
+    renderWarAutoPeriodControls();
+    renderWarAutoView();
+  renderWarRankingView();
+  renderMembersSyncView();
+  renderApiLogsView();
+  renderHubLeaderView();
+  renderHubRiskView();
+  renderHubDecisionView();
+  renderHubClanView();
+  updateDrawerProfileSummary();
+  renderDecksView();
+  });
+  ui.warAutoWeekChipBar?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-war-auto-week]');
+    if(!btn) return;
+    const nextWeek = Number(btn.dataset.warAutoWeek || 1);
+    state.ui ||= {};
+    state.ui.warAutoWeek = nextWeek;
+    saveState();
+    renderWarAutoPeriodControls();
+    renderWarAutoView();
+  renderWarRankingView();
+  renderMembersSyncView();
+  renderApiLogsView();
+  renderHubLeaderView();
+  renderHubRiskView();
+  renderHubDecisionView();
+  renderHubClanView();
+  updateDrawerProfileSummary();
+  renderDecksView();
+  });
+  ui.drawerBackdrop?.addEventListener('click', closeDrawer);
+  document.getElementById('syncRefreshBtn')?.addEventListener('click', manualRefreshSync);
+  document.body.addEventListener('change', e => {
+    if(e.target.matches('[data-leadership-scope]')){
+      refreshLeadershipNoticeComposer();
+      return;
+    }
+
+    if(e.target.matches('[data-position-input]')){
+      updatePosition(e.target.dataset.positionInput, e.target.value);
+    }
+    if(e.target.matches('#classificationRoleSelect')){
+      state.ui.classificationRole = e.target.value || 'ALL';
+      saveState();
+      renderClassification();
+    }
+    if(e.target.matches('[data-tool-role="war"]')){
+      state.ui.warRole = e.target.value || 'ALL';
+      saveState();
+      render();
+    }
+    if(e.target.matches('[data-tool-role="tournament"]')){
+      state.ui.tournamentRole = e.target.value || 'ALL';
+      saveState();
+      render();
+    }
+    if(e.target.matches('[data-member-profile-month]')){
+      state.ui.memberProfileMonth = e.target.value || state.meta.currentMonth;
+      saveState();
+      openMember(e.target.dataset.memberProfileMonth);
+    }
+  });
+  document.body.addEventListener('input', e => {
+    if(e.target.matches('#classificationQueryInput')){
+      state.ui.classificationQuery = e.target.value || '';
+      saveState();
+      renderClassification();
+    }
+    if(e.target.matches('[data-tool-query="war"]')){
+      state.ui.warQuery = e.target.value || '';
+      saveState();
+      applyToolFilters('war');
+    }
+    if(e.target.matches('[data-tool-query="tournament"]')){
+      state.ui.tournamentQuery = e.target.value || '';
+      saveState();
+      applyToolFilters('tournament');
+    }
+  });
+  $('#goalForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const month = state.meta.currentMonth;
+    state.goals[month] = {
+      attacks: Number($('#goalAttacksInput').value || 0),
+      tournament: Number($('#goalTournamentInput').value || 0)
+    };
+    saveState();
+    closeGoals();
+    render();
+  });
+  $('#exportBtn').addEventListener('click', exportBackup);
+  $('#importInput').addEventListener('change', e => e.target.files[0] && importBackup(e.target.files[0]));
+  $('#restoreSeedBtn').addEventListener('click', () => {
+    if(confirm('Restaurar agora a base original da V5.5.10 e ignorar o cache antigo?')){
+      const restored = ensureDataCompleteness(deepClone(seedData));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
+location.reload();
+    }
+  });
+  $('#resetBtn').addEventListener('click', () => {
+    if(confirm('Limpar o app e apagar também a cópia migrada das versões anteriores?')){
+      localStorage.removeItem(STORAGE_KEY);
+      location.reload();
+    }
+  });
+  ui.vaultAccessForm?.addEventListener('submit', e => {
+    e.preventDefault();
+    const value = (ui.vaultPasswordInput?.value || '').trim();
+    if(value === VAULT_PASSWORD){
+      unlockVaultSession();
+      closeVaultPrompt();
+      setActiveView('vaultView');
+    }else{
+      signalVaultError();
+      if(ui.vaultPasswordInput){
+        ui.vaultPasswordInput.focus();
+        ui.vaultPasswordInput.select?.();
+      }
+    }
+  });
+  $('#addMemberBtn').addEventListener('click', addMember);
+  ui.createMemberForm?.addEventListener('submit', e => { e.preventDefault(); createMemberFromModal(); });
+  ui.backToTopBtn?.addEventListener('click', scrollToTopSmooth);
+  window.addEventListener('scroll', updateBackToTopVisibility, {passive:true});
+  
+  document.addEventListener('touchstart', handleTouchStart, {passive:true});
+  document.addEventListener('touchmove', handleTouchMove, {passive:true});
+  document.addEventListener('touchend', handleTouchEnd, {passive:true});
+  document.addEventListener('touchcancel', handleTouchEnd, {passive:true});
+  updateBackToTopVisibility();
+  $('#shareRankingBtn').addEventListener('click', openShareCard);
+
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    deferredPrompt = e;
+    ui.installBtn.classList.remove('hidden');
+  });
+  ui.installBtn.addEventListener('click', async() => {
+    if(deferredPrompt){
+      deferredPrompt.prompt();
+      deferredPrompt = null;
+      ui.installBtn.classList.add('hidden');
+    }else{
+      alert('No iPhone: abra no Safari > Compartilhar > Adicionar à Tela de Início.');
+    }
+  });
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js?v=6.1-auth');
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  syncCurrentPresence(document.hidden ? 'offline' : 'online');
+  if(document.hidden){
+    clearWarAutoRefreshTimer();
+  }else if(activeViewId === 'warAutoView'){
+    runWarAutoRefreshCycle('resume');
+    startWarAutoRefreshTimer();
+  }
+});
+
+window.TOPBRS_APP = {
+  getState(){ return deepClone(state); },
+  replaceState(nextState){
+    const incoming = nextState && typeof nextState === 'object' ? deepClone(nextState) : {};
+    if(!Array.isArray(incoming.authUsers) && Array.isArray(state.authUsers)){
+      incoming.authUsers = deepClone(state.authUsers);
+    }
+    const hydrated = ensureDataCompleteness(mergeWithSeed(incoming));
+    syncTemporalSelectionsToRealDate(hydrated);
+    for(const key of Object.keys(state)){ delete state[key]; }
+    Object.assign(state, hydrated);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+render();
+  },
+  saveState,
+  render,
+  markSyncTimestamp,
+  monthLabel
+};
+const __didSyncTemporalSelections = syncTemporalSelectionsToRealDate(state);
+if(__didSyncTemporalSelections){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+bind();
+const __initialViewId = document.querySelector('.view.active')?.id || 'arenaView';
+setActiveView(__initialViewId);
+render();
+ensureRealtimeMessaging();
+startPresenceHeartbeat();
+bootstrapWarHistoryForArena(true);
+setTimeout(() => bootstrapWarHistoryForArena(true), 1800);
+if((document.querySelector('.view.active')?.id || 'arenaView') === 'warAutoView'){ startWarAutoRefreshTimer(); }
+updateFloatingHeader();
+})();
+
+
+document.addEventListener('click', (event) => {
+  const target = event.target.closest('[data-save-user-edit]');
+  if(!target) return;
+  const uid = target.dataset.saveUserEdit;
+  const users = state.users || [];
+  const index = users.findIndex(item => item.uid === uid);
+  if(index === -1) return;
+  users[index] = {
+    ...users[index],
+    name: String(document.getElementById('userEditName')?.value || '').trim(),
+    nick: String(document.getElementById('userEditNick')?.value || '').trim(),
+    clanRole: String(document.getElementById('userEditClanRole')?.value || 'Membro'),
+    accessRole: String(document.getElementById('userEditAccessRole')?.value || 'viewer')
+  };
+  state.users = users;
+  saveState();
+  ui.userEditModal?.classList.add('hidden');
+  render();
+  showToast('Usuário atualizado com sucesso.');
+});
+
+
+/* v6.4.17 + Guerra Auto 1.5.6 */
+function fixHeaderOverlap(){
+  const header = document.querySelector('.topbar');
+  if(!header) return;
+  const height = header.offsetHeight;
+  document.documentElement.style.setProperty('--header-offset', height + 'px');
+}
+
+window.addEventListener('load', fixHeaderOverlap);
+window.addEventListener('resize', fixHeaderOverlap);
+
+window.addEventListener('pagehide', () => { syncCurrentPresence('offline'); });
+window.addEventListener('beforeunload', () => { syncCurrentPresence('offline'); });
+
+
+// ===== AUTH PARALLAX V2.4.2 =====
+(function(){
+  const root = document.documentElement;
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const setParallax = (x, y) => {
+    root.style.setProperty('--auth-parallax-x', `${x}px`);
+    root.style.setProperty('--auth-parallax-y', `${y}px`);
+  };
+
+  window.addEventListener('pointermove', (e) => {
+    const w = window.innerWidth || 1;
+    const h = window.innerHeight || 1;
+    const nx = (e.clientX / w) - 0.5;
+    const ny = (e.clientY / h) - 0.5;
+    setParallax(clamp(nx * 10, -8, 8), clamp(ny * 10, -8, 8));
+  }, { passive: true });
+
+  window.addEventListener('deviceorientation', (e) => {
+    const gamma = clamp((e.gamma || 0) / 6, -8, 8);
+    const beta = clamp((e.beta || 0) / 12, -8, 8);
+    setParallax(gamma, beta);
+  }, { passive: true });
+})();
+
+
+
+
+
+
+
+
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && !ui.classificationDetailModal?.classList.contains('hidden')) closeClassificationDetail();
+});
+
+// ===== V2.4.8 SAFE NO-OP AUTH HELPER =====
+window.forceHideAuthGateIfLogged = function(){};
+
+
+(function classificationFloatingSelf(){
+  let ticking = false;
+  function syncFloatingSelf(){
+    ticking = false;
+    const btn = document.querySelector('.classification-floating-self');
+    if(!btn) return;
+    if(window.scrollY < 260){
+      btn.classList.remove('is-hidden');
+    }
+  }
+  window.addEventListener('scroll', () => {
+    if(ticking) return;
+    ticking = true;
+    requestAnimationFrame(syncFloatingSelf);
+  }, { passive:true });
+})();
